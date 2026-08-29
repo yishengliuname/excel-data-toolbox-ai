@@ -2444,9 +2444,12 @@ def _style_enterprise_management_sheet(worksheet: Any, *, header_row: int) -> No
             worksheet.row_dimensions[row].hidden = True
             worksheet.row_dimensions[row].outlineLevel = 1
 
-        def dashboard_value(name: str) -> Any:
-            column = headers.get(name)
-            return worksheet.cell(header_row + 1, column).value if column else None
+        def dashboard_value(*names: str) -> Any:
+            for name in names:
+                column = headers.get(name)
+                if column:
+                    return worksheet.cell(header_row + 1, column).value
+            return None
 
         restaurant = "门店_门店" in headers
         compact_restaurant = {"月度_月份", "月度_营业额", "月度_管理利润", "月度_管理利润率", "门店_营业额", "门店_管理利润", "门店_管理利润率"}.issubset(headers)
@@ -2463,7 +2466,7 @@ def _style_enterprise_management_sheet(worksheet: Any, *, header_row: int) -> No
             worksheet["A2"] = "增长质量、现金转化、渠道真实盈利、广告效率和库存占用｜原生 Excel 图表可编辑"
         kpi_cards = (
             (1, 4, "成交实付" if ecommerce else ("净营业收入" if compact_restaurant else ("营业实付" if restaurant else "销售规模")), dashboard_value("KPI_销售规模"), '#,##0 "元"', "2F75B5"),
-            (6, 9, "现金转化率" if ecommerce else ("管理利润率" if compact_restaurant else ("平台到账率" if restaurant else "回款率")), dashboard_value("KPI_回款率"), "0.0%", "008C72"),
+            (6, 9, "现金转化率" if ecommerce else ("管理利润率" if compact_restaurant else ("平台到账率" if restaurant else "回款率")), dashboard_value("KPI_管理利润率", "KPI_平台到账率", "KPI_回款率"), "0.0%", "008C72"),
             (
                 11,
                 14,
@@ -2473,8 +2476,8 @@ def _style_enterprise_management_sheet(worksheet: Any, *, header_row: int) -> No
                 "6B5FD2",
             ),
             (1, 4, "趋势性管理贡献" if ecommerce else ("管理利润" if compact_restaurant else ("情景经营结果（待核验）" if restaurant else "估算经营结果")), dashboard_value("KPI_估算经营结果"), '#,##0 "元"', "E26A45"),
-            (6, 9, "已发生退款" if ecommerce else ("已发生退款" if restaurant else "风险订单金额"), dashboard_value("KPI_风险订单"), '#,##0 "元"', "B42318"),
-            (11, 14, "期末库存金额" if ecommerce else ("平台费" if compact_restaurant else ("报损金额线索" if restaurant else "库存金额")), dashboard_value("KPI_库存金额"), '#,##0 "元"', "D99614"),
+            (6, 9, "已发生退款" if ecommerce else ("已发生退款" if restaurant else "风险订单金额"), dashboard_value("KPI_已发生退款", "KPI_风险订单"), '#,##0 "元"', "B42318"),
+            (11, 14, "期末库存金额" if ecommerce else ("平台费" if compact_restaurant else ("报损金额线索" if restaurant else "库存金额")), dashboard_value("KPI_平台费", "KPI_报损金额", "KPI_库存金额"), '#,##0 "元"', "D99614"),
         )
         for index, (start_col, end_col, label, value, fmt, colour) in enumerate(kpi_cards):
             label_row, value_start, value_end = (4, 5, 7) if index < 3 else (9, 10, 12)

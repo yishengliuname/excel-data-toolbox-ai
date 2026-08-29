@@ -349,6 +349,14 @@ def build_adaptive_analysis_report(
     metric_columns = [column for column in compiled.metrics if column in primary.columns]
     metric_columns.extend(column for column in inferred_metrics if column not in metric_columns)
     metric_columns = metric_columns[:12]
+    # Keep unknown numeric fields visible in the audit/dictionary, but never
+    # invent a mean or total for them.  Ranking falls back to record count when
+    # there is no semantically safe additive/count metric.
+    aggregatable_metrics = [
+        column
+        for column in metric_columns
+        if classify_metric(column).aggregation in {"sum", "count", "distinct_count"}
+    ]
     date_columns = [column for column in compiled.dates if column in primary.columns]
     date_columns.extend(
         column for column, info in primary_roles.items() if info["role"] == "日期" and column not in date_columns
@@ -388,7 +396,7 @@ def build_adaptive_analysis_report(
     overview = pd.DataFrame(overview_rows)
 
     ranking_rows = []
-    ranking_metric = metric_columns[0] if metric_columns else None
+    ranking_metric = aggregatable_metrics[0] if aggregatable_metrics else None
     for dimension in category_columns[:4]:
         if ranking_metric:
             grouped = grouped_metric(primary, dimension, ranking_metric).rename(columns={ranking_metric: "指标值"})
@@ -406,8 +414,9 @@ def build_adaptive_analysis_report(
             })
     ranking = pd.DataFrame(ranking_rows, columns=["分析维度", "分类", "指标字段", "汇总方式", "指标值", "排名", "占比"])
 
-    trend = pd.DataFrame(columns=["月份", *metric_columns[:3]])
-    if date_columns and metric_columns:
+    trend_metrics = aggregatable_metrics[:3]
+    trend = pd.DataFrame(columns=["月份", *trend_metrics])
+    if date_columns and trend_metrics:
         date_column = date_columns[0]
         trend_source = primary.copy(deep=True)
         trend_source[date_column] = pd.to_datetime(trend_source[date_column], errors="coerce")
@@ -415,7 +424,7 @@ def build_adaptive_analysis_report(
         if not trend_source.empty:
             trend_source["月份"] = trend_source[date_column].dt.to_period("M").astype(str)
             trend = trend_source[["月份"]].drop_duplicates().sort_values("月份", kind="stable")
-            for column in metric_columns[:3]:
+            for column in trend_metrics:
                 grouped = grouped_metric(trend_source, "月份", column)
                 trend = trend.merge(grouped, on="月份", how="left")
 
@@ -475,7 +484,7 @@ def build_adaptive_analysis_report(
         dashboard[f"排名{column}"] = top_rank[column].reindex(range(dashboard_rows)) if column in top_rank else pd.NA
     if not trend.empty:
         dashboard["月份"] = trend["月份"].reindex(range(dashboard_rows))
-        for column in metric_columns[:3]:
+        for column in trend_metrics:
             if column in trend: dashboard[f"趋势_{column}"] = trend[column].reindex(range(dashboard_rows))
     if any(chart.kind == "composition" for chart in compiled.charts) and not top_rank.empty:
         dashboard["结构分类"] = top_rank["分类"].reindex(range(dashboard_rows))

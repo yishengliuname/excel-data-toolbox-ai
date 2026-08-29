@@ -24,7 +24,7 @@ _SCORE = re.compile(r"评分|满意度|得分|指数|score|rating", re.I)
 _BALANCE = re.compile(r"期末|余额|结余|结存|现有库存|当前库存|库存余额|balance|ending", re.I)
 _ADDITIVE = re.compile(
     r"销售|营业额|收入|金额|成本|费用|利润|退款|回款|工资|薪资|租金|水电|营销|佣金|"
-    r"平台费|广告|采购|损耗|实付|到账|revenue|sales|amount|cost|expense|profit|refund|salary",
+    r"平台费|广告|采购|损耗|实付|到账|结算基数|revenue|sales|amount|cost|expense|profit|refund|salary",
     re.I,
 )
 _COUNT = re.compile(r"数量|销量|订单数|人数|件数|次数|小时|天数|qty|quantity|count|hours|days", re.I)
@@ -66,7 +66,7 @@ def classify_metric(name: Any) -> MetricSemantic:
         return MetricSemantic("additive", "sum", "元" if re.search(r"额|金额|成本|费用|利润|退款|回款|工资|薪资|租金|水电|营销|佣金|实付|到账", text) else "", "可加金额采用有效值求和")
     if _COUNT.search(text):
         return MetricSemantic("count", "sum", "", "可加数量采用有效值求和")
-    return MetricSemantic("numeric", "mean", "", "未知数值默认平均并标记为待核验")
+    return MetricSemantic("numeric", "unknown", "", "未知数值不自动聚合，必须先确认业务语义")
 
 
 def classify_sheet_role(name: Any, frame: pd.DataFrame) -> str:
@@ -140,6 +140,18 @@ def ratio_components(metric_name: str, columns: Iterable[Any]) -> tuple[str, str
     return None
 
 
+def _single_time_column(frame: pd.DataFrame, *, exclude: Iterable[str] = ()) -> str | None:
+    excluded = {str(column) for column in exclude}
+    candidates = []
+    for column in frame.columns:
+        name = str(column)
+        if name in excluded or classify_metric(name).kind != "date":
+            continue
+        if pd.to_datetime(frame[column], errors="coerce").notna().any():
+            candidates.append(name)
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def aggregate_metric(frame: pd.DataFrame, column: str) -> tuple[float, str, MetricSemantic]:
     """Aggregate one metric and return value, disclosed method and semantics."""
 
@@ -153,12 +165,18 @@ def aggregate_metric(frame: pd.DataFrame, column: str) -> tuple[float, str, Metr
             den = pd.to_numeric(frame[denominator], errors="coerce").sum(min_count=1)
             value = float(num / den) if pd.notna(num) and pd.notna(den) and den != 0 else float("nan")
             return value, f"{numerator}合计÷{denominator}合计（加权口径）", semantic
-        return float(values.mean()), "未识别分子/分母，暂取有效值平均并标记人工核验", semantic
+        return float("nan"), "未识别比例分子/分母，禁止自动平均；需要人工确认", semantic
     if semantic.aggregation == "sum":
         return float(values.sum(min_count=1)), "有效值求和", semantic
     if semantic.aggregation == "last":
-        valid = values.dropna()
-        return (float(valid.iloc[-1]) if not valid.empty else float("nan")), "按当前顺序取期末有效值", semantic
+        date_column = _single_time_column(frame)
+        if date_column is None:
+            return float("nan"), "缺少唯一可用时间字段，禁止按当前行顺序认定期末值", semantic
+        ordered = pd.DataFrame({"_date": pd.to_datetime(frame[date_column], errors="coerce"), "_value": values}).dropna()
+        ordered = ordered.sort_values("_date", kind="stable")
+        return (float(ordered.iloc[-1]["_value"]) if not ordered.empty else float("nan")), f"按{date_column}排序后取期末有效值", semantic
+    if semantic.aggregation == "unknown":
+        return float("nan"), "未知数值语义，禁止自动求和或平均；需要人工确认", semantic
     return float(values.mean()), "有效值算术平均", semantic
 
 
@@ -173,7 +191,28 @@ def grouped_metric(frame: pd.DataFrame, group_column: str, metric_column: str) -
             grouped = frame.groupby(group_column, dropna=False, observed=True)[[numerator, denominator]].sum(min_count=1)
             grouped[metric_column] = grouped[numerator].div(grouped[denominator].where(grouped[denominator].ne(0)))
             return grouped[[metric_column]].reset_index()
-    method = "sum" if semantic.aggregation == "sum" else ("last" if semantic.aggregation == "last" else "mean")
+        result = frame[[group_column]].drop_duplicates().reset_index(drop=True)
+        result[metric_column] = float("nan")
+        return result
+    if semantic.aggregation == "unknown":
+        result = frame[[group_column]].drop_duplicates().reset_index(drop=True)
+        result[metric_column] = float("nan")
+        return result
+    if semantic.aggregation == "last":
+        date_column = _single_time_column(frame, exclude=(group_column,))
+        if date_column is None:
+            counts = pd.to_numeric(frame[metric_column], errors="coerce").groupby(frame[group_column], dropna=False).count()
+            if bool(counts.le(1).all()):
+                return frame.groupby(group_column, dropna=False, observed=True)[metric_column].last().reset_index()
+            result = frame[[group_column]].drop_duplicates().reset_index(drop=True)
+            result[metric_column] = float("nan")
+            return result
+        work = frame[[group_column, date_column, metric_column]].copy()
+        work[date_column] = pd.to_datetime(work[date_column], errors="coerce")
+        work[metric_column] = pd.to_numeric(work[metric_column], errors="coerce")
+        work = work.dropna(subset=[date_column, metric_column]).sort_values(date_column, kind="stable")
+        return work.groupby(group_column, dropna=False, observed=True)[metric_column].last().reset_index()
+    method = "sum" if semantic.aggregation == "sum" else "mean"
     return frame.groupby(group_column, dropna=False, observed=True)[metric_column].agg(method).reset_index()
 
 

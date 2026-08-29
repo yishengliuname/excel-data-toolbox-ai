@@ -60,16 +60,44 @@ def _find(frame: pd.DataFrame, *aliases: str, required: bool = False) -> str | N
     for alias in aliases:
         if _norm(alias) in cols:
             return cols[_norm(alias)]
-    for key, col in cols.items():
-        if any(len(_norm(a)) >= 2 and _norm(a) in key for a in aliases):
-            return col
+    matches = {
+        col
+        for key, col in cols.items()
+        if any(len(_norm(alias)) >= 2 and _norm(alias) in key for alias in aliases)
+    }
+    if len(matches) == 1:
+        return next(iter(matches))
+    if len(matches) > 1 and required:
+        raise ValueError(f"字段匹配不唯一：{'/'.join(aliases)}；候选：{'、'.join(sorted(matches))}")
     if required:
         raise ValueError(f"缺少字段：{'/'.join(aliases)}")
     return None
 
 
 def _num(series: pd.Series) -> pd.Series:
-    return pd.to_numeric(series.astype("string").str.replace(r"[¥￥元,，%％\s件个kg公斤箱份]", "", regex=True), errors="coerce")
+    text = series.astype("string").str.strip()
+    percentage = text.str.contains(r"[%％]", regex=True, na=False)
+    values = pd.to_numeric(
+        text.str.replace(r"[¥￥元,，%％\s件个kg公斤箱份]", "", regex=True),
+        errors="coerce",
+    ).astype("Float64")
+    return values.where(~percentage, values / 100.0)
+
+
+def _col_exact(frame: pd.DataFrame, *aliases: str) -> pd.Series:
+    """Return an exact column-name match without substring inference.
+
+    A total such as ``人工总成本`` must not silently match the component
+    ``其他人工成本``.  Exact matching keeps source totals optional and lets the
+    component sum remain the authoritative fallback.
+    """
+
+    columns = {_norm(column): column for column in frame.columns}
+    for alias in aliases:
+        column = columns.get(_norm(alias))
+        if column is not None:
+            return frame[column]
+    return pd.Series(pd.NA, index=frame.index, dtype="object")
 
 
 def _text(series: pd.Series) -> pd.Series:
@@ -154,15 +182,6 @@ def _col(frame: pd.DataFrame, *aliases: str, required: bool = False) -> pd.Serie
     return frame[name] if name else pd.Series(pd.NA, index=frame.index)
 
 
-def _col_pos(frame: pd.DataFrame, aliases: Sequence[str], position: int) -> pd.Series:
-    name = _find(frame, *aliases)
-    if name:
-        return frame[name]
-    if 0 <= position < frame.shape[1]:
-        return frame.iloc[:, position]
-    return pd.Series(pd.NA, index=frame.index)
-
-
 def _fact(metric: str, value: Any, unit: str, source: str, definition: str, meaning: str, confidence: str = "高") -> dict[str, Any]:
     if isinstance(value, float) and not math.isfinite(value):
         value = "未提供"
@@ -224,12 +243,16 @@ def _compact_restaurant_report(
     work["净营业收入"] = numeric("net_revenue") if columns.get("net_revenue") else work["营业额"] - work["退款"]
     cost_columns = ["食材成本", "人工成本", "平台费", "租金", "水电", "营销"]
     work["重算管理利润"] = work["净营业收入"] - work[cost_columns].sum(axis=1, min_count=len(cost_columns))
-    work["管理利润"] = numeric("profit")
-    if not columns.get("profit"):
-        work["管理利润"] = work["重算管理利润"]
+    work["源管理利润"] = numeric("profit")
+    complete_cost_components = all(
+        columns.get(key) is not None
+        for key in ("food", "labor", "platform", "rent", "utilities", "marketing")
+    )
+    work["管理利润"] = work["重算管理利润"] if complete_cost_components else work["源管理利润"]
+    work["利润主口径"] = "按完整成本组件重算" if complete_cost_components else "源管理利润（成本组件不完整）"
     work["管理利润率"] = work["管理利润"].div(work["净营业收入"].where(work["净营业收入"].ne(0)))
     work["源利润率"] = numeric("margin") if columns.get("margin") else work["管理利润率"]
-    work["利润勾稽差异"] = work["管理利润"] - work["重算管理利润"]
+    work["利润勾稽差异"] = work["源管理利润"] - work["重算管理利润"]
     work["净收入勾稽差异"] = work["净营业收入"] - (work["营业额"] - work["退款"])
     work["精确重复"] = work.drop(columns=["源行号"]).duplicated(keep=False)
     valid = work.loc[work["月份"].notna() & work["门店"].ne("")].copy()
@@ -414,12 +437,12 @@ def _compact_restaurant_report(
 
     dashboard_columns: dict[str, pd.Series] = {
         "KPI_销售规模": pd.Series([float(totals["净营业收入"])]),
-        "KPI_回款率": pd.Series([overall_margin]),
+        "KPI_管理利润率": pd.Series([overall_margin]),
         "KPI_毛利标题": pd.Series(["食材成本率"]),
         "KPI_毛利率": pd.Series([food_rate]),
         "KPI_估算经营结果": pd.Series([float(totals["管理利润"])]),
-        "KPI_风险订单": pd.Series([float(totals["退款"])]),
-        "KPI_库存金额": pd.Series([float(totals["平台费"])]),
+        "KPI_已发生退款": pd.Series([float(totals["退款"])]),
+        "KPI_平台费": pd.Series([float(totals["平台费"])]),
         "核心诊断": pd.Series([
             f"{best_store}管理利润与利润率领先；{highest_revenue_store}收入最高但利润转化偏弱。"
             f"{last['月份']}净营业收入较上月{revenue_change:+.1%}，管理利润率由{previous['管理利润率']:.2%}降至{last['管理利润率']:.2%}。"
@@ -512,6 +535,7 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
     if not pos["有效订单"].any():
         pos["有效订单"] = ~pos["订单状态"].str.contains("取消|关闭|退款", regex=True, na=False)
     pos["精确重复"] = pos.duplicated(keep="first")
+    raw_duplicate_count = int(pos["精确重复"].sum())
     pos = pos.loc[~pos["精确重复"]].copy()
     pos = pos.merge(dish_map, on="菜品编码", how="left", validate="many_to_one")
     pos["标准食材成本金额"] = pos["数量"].fillna(0) * pos["标准食材成本"].fillna(0)
@@ -524,18 +548,40 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
     refund_by_order = refunds.loc[refunds["已发生退款"]].groupby("原订单号", as_index=False)["退款金额"].sum().rename(columns={"退款金额": "已退款金额"})
     pos = pos.merge(refund_by_order, left_on="订单号", right_on="原订单号", how="left").drop(columns=["原订单号"], errors="ignore")
     pos["已退款金额"] = pos["已退款金额"].fillna(0)
+    pos["订单实付合计"] = pos.groupby("订单号", dropna=False)["实付分摊"].transform("sum")
+    pos["退款分摊"] = pos["已退款金额"].mul(pos["实付分摊"]).div(
+        pos["订单实付合计"].where(pos["订单实付合计"].gt(0))
+    )
+    pos["退款分摊状态"] = "无退款"
+    pos.loc[pos["已退款金额"].gt(0) & pos["订单实付合计"].gt(0), "退款分摊状态"] = "按订单行实付比例分摊"
+    pos.loc[pos["已退款金额"].gt(0) & ~pos["订单实付合计"].gt(0), "退款分摊状态"] = "人工核验：订单实付合计无效"
     total_sales = float(pos.loc[pos["有效订单"], "实付分摊"].sum())
     total_refund = float(refunds.loc[refunds["已发生退款"], "退款金额"].sum())
     standard_food = float(pos.loc[pos["有效订单"], "标准食材成本金额"].sum())
 
     settlement = r["settlements"]
-    settlement_out = pd.DataFrame({"结算月份": _text(_col(settlement, "结算月份", "月份", required=True)), "门店编码": _text(_col(settlement, "门店编码", "门店")), "平台": _text(_col(settlement, "平台", "渠道")), "结算基数": _num(_col(settlement, "订单结算基数", "结算基数", "订单金额")), "平台佣金": _num(_col(settlement, "平台佣金", "佣金")), "配送服务费": _num(_col(settlement, "配送服务费", "配送费")), "活动补贴扣减": _num(_col(settlement, "活动补贴扣减", "活动扣减")), "退款冲减": _num(_col(settlement, "退款冲减")), "实际到账": _num(_col(settlement, "实际到账", "到账金额", "实收"))})
-    settlement_out["可比平台成本"] = settlement_out[["平台佣金", "配送服务费", "活动补贴扣减"]].fillna(0).sum(axis=1)
+    settlement_out = pd.DataFrame({"结算月份": _text(_col(settlement, "结算月份", "月份", required=True)), "门店编码": _text(_col(settlement, "门店编码", "门店")), "平台": _text(_col(settlement, "平台", "渠道")), "结算基数": _num(_col(settlement, "订单结算基数", "结算基数", "订单金额")), "平台佣金": _num(_col(settlement, "平台佣金", "佣金")), "配送服务费": _num(_col(settlement, "配送服务费", "配送费")), "活动补贴承担": _num(_col(settlement, "活动补贴承担", "平台活动承担", "活动补贴成本", "活动补贴扣减", "活动扣减")), "退款冲减": _num(_col(settlement, "退款冲减")), "实际到账": _num(_col(settlement, "实际到账", "到账金额", "实收"))})
+    settlement_out["可比平台成本"] = settlement_out[["平台佣金", "配送服务费", "活动补贴承担"]].fillna(0).sum(axis=1)
+    settlement_out["理论到账"] = (
+        settlement_out["结算基数"]
+        - settlement_out["平台佣金"].fillna(0)
+        - settlement_out["配送服务费"].fillna(0)
+        - settlement_out["活动补贴承担"].fillna(0)
+        - settlement_out["退款冲减"].fillna(0)
+    )
+    settlement_out["到账勾稽差异"] = settlement_out["实际到账"] - settlement_out["理论到账"]
     settlement_out["平台到账率"] = settlement_out["实际到账"].div(settlement_out["结算基数"].where(settlement_out["结算基数"].ne(0)))
-    settlement_out["可比经营贡献"] = settlement_out["实际到账"] - settlement_out["可比平台成本"]
+    settlement_out["可比经营贡献"] = settlement_out["实际到账"]
+    settlement_out["贡献口径"] = "实际到账（佣金、配送、活动补贴及退款已在结算链扣除，不重复扣费）"
 
     labor = r["labor"]
-    labor_out = pd.DataFrame({"月份": _text(_col(labor, "月份", "期间", required=True)), "门店编码": _text(_col(labor, "门店编码", "门店")), "岗位人数": _num(_col(labor, "岗位人数", "人数")), "排班工时": _num(_col(labor, "排班工时", "计划工时")), "实际工时": _num(_col(labor, "实际工时", "工时")), "加班工时": _num(_col(labor, "加班工时", "加班")), "工资成本": _num(_col(labor, "工资成本", "人工成本", "工资")), "加班工资": _num(_col(labor, "加班工资", "加班成本")), "缺勤小时": _num(_col(labor, "缺勤小时", "缺勤"))})
+    labor_out = pd.DataFrame({"月份": _text(_col(labor, "月份", "期间", required=True)), "门店编码": _text(_col(labor, "门店编码", "门店")), "岗位人数": _num(_col(labor, "岗位人数", "人数")), "排班工时": _num(_col(labor, "排班工时", "计划工时")), "实际工时": _num(_col(labor, "实际工时", "工时")), "加班工时": _num(_col(labor, "加班工时", "加班")), "工资成本": _num(_col(labor, "工资成本", "基本工资", "工资")), "临时工成本": _num(_col(labor, "临时工成本", "临时用工成本", "临时工工资")), "加班工资": _num(_col(labor, "加班工资", "加班成本")), "其他人工成本": _num(_col(labor, "其他人工成本", "其他人工", "福利社保")), "源人工总成本": _num(_col_exact(labor, "人工总成本", "人工成本", "人员总成本")), "缺勤小时": _num(_col(labor, "缺勤小时", "缺勤"))})
+    labor_components = ["工资成本", "临时工成本", "加班工资", "其他人工成本"]
+    labor_out["组件人工成本"] = labor_out[labor_components].sum(axis=1, min_count=1)
+    labor_out["人工总成本"] = labor_out["源人工总成本"].where(
+        labor_out["源人工总成本"].notna(), labor_out["组件人工成本"]
+    )
+    labor_out["人工勾稽差异"] = labor_out["源人工总成本"] - labor_out["组件人工成本"]
     labor_out["加班率"] = labor_out["加班工时"].div(labor_out["实际工时"].where(labor_out["实际工时"].ne(0)))
     labor_out["工时效率参考"] = labor_out["实际工时"].div(labor_out["岗位人数"].where(labor_out["岗位人数"].ne(0)))
 
@@ -550,7 +596,7 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
     store_sales = valid.groupby("门店编码", as_index=False).agg(营业实付=("实付分摊", "sum"), 订单数=("订单号", "nunique"), 标准食材成本=("标准食材成本金额", "sum"))
     store_refunds = refunds.loc[refunds["已发生退款"]].merge(pos[["订单号", "门店编码"]].drop_duplicates(), left_on="原订单号", right_on="订单号", how="left").groupby("门店编码", as_index=False)["退款金额"].sum().rename(columns={"退款金额": "已退款金额"})
     store_settlement = settlement_out.groupby("门店编码", as_index=False).agg(实际到账=("实际到账", "sum"), 平台成本=("可比平台成本", "sum"))
-    store_labor = labor_out.groupby("门店编码", as_index=False).agg(人工成本=("工资成本", "sum"), 加班工时=("加班工时", "sum"), 实际工时=("实际工时", "sum"))
+    store_labor = labor_out.groupby("门店编码", as_index=False).agg(人工成本=("人工总成本", "sum"), 加班工时=("加班工时", "sum"), 实际工时=("实际工时", "sum"))
     store_fixed = fixed_out.groupby("门店编码", as_index=False).agg(固定费用=("金额", "sum"))
     store = store_sales.merge(store_refunds, on="门店编码", how="left").merge(store_settlement, on="门店编码", how="left").merge(store_labor, on="门店编码", how="left").merge(store_fixed, on="门店编码", how="left")
     if not store_names.empty:
@@ -564,41 +610,91 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
     scale_mismatch = (total_sales < max(1.0, float(store["人工成本"].sum() + store["固定费用"].sum()) * 0.2))
     store["结论限制"] = "收入与人工/固定费用尺度明显不匹配，经营结果仅供口径核验" if scale_mismatch else "管理口径可比贡献"
 
-    dish_out = valid.groupby(["菜品编码", "菜品名称"], dropna=False, as_index=False).agg(销量=("数量", "sum"), 营业实付=("实付分摊", "sum"), 标准食材成本金额=("标准食材成本金额", "sum"))
-    dish_out["退款后贡献"] = dish_out["营业实付"] - dish_out["标准食材成本金额"]
-    dish_out["贡献率"] = dish_out["退款后贡献"].div(dish_out["营业实付"].where(dish_out["营业实付"].ne(0)))
+    dish_out = valid.groupby(["菜品编码", "菜品名称"], dropna=False, as_index=False).agg(销量=("数量", "sum"), 营业实付=("实付分摊", "sum"), 已退款金额=("退款分摊", "sum"), 标准食材成本金额=("标准食材成本金额", "sum"))
+    dish_out["退款后实付"] = dish_out["营业实付"] - dish_out["已退款金额"]
+    dish_out["退款后贡献"] = dish_out["退款后实付"] - dish_out["标准食材成本金额"]
+    dish_out["贡献率"] = dish_out["退款后贡献"].div(dish_out["退款后实付"].where(dish_out["退款后实付"].ne(0)))
     dish_out["管理提示"] = dish_out.apply(lambda x: "高销量低贡献，检查定价/折扣/BOM" if x["贡献率"] < low_margin_threshold else "正常" if pd.notna(x["贡献率"]) else "标准成本缺失，人工核验", axis=1)
 
     month_sales = valid.groupby("月份", as_index=False).agg(营业实付=("实付分摊", "sum"), 标准食材成本=("标准食材成本金额", "sum"))
     month_ref = refunds.loc[refunds["已发生退款"]].assign(月份=_month(refunds.loc[refunds["已发生退款"], "退款日期"])).groupby("月份", as_index=False)["退款金额"].sum().rename(columns={"退款金额": "已退款金额"})
-    month_labor = labor_out.groupby("月份", as_index=False).agg(人工成本=("工资成本", "sum"), 加班工时=("加班工时", "sum"))
+    month_labor = labor_out.groupby("月份", as_index=False).agg(人工成本=("人工总成本", "sum"), 加班工时=("加班工时", "sum"))
+    month_platform = settlement_out.groupby("结算月份", as_index=False)["可比平台成本"].sum().rename(columns={"结算月份": "月份", "可比平台成本": "平台成本"})
     month_fixed = fixed_out.groupby("月份", as_index=False)["金额"].sum().rename(columns={"金额": "固定费用"})
-    monthly = month_sales.merge(month_ref, on="月份", how="outer").merge(month_labor, on="月份", how="outer").merge(month_fixed, on="月份", how="outer").fillna(0)
-    monthly["可比经营贡献"] = monthly["营业实付"] - monthly["已退款金额"] - monthly["标准食材成本"]
+    monthly = month_sales.merge(month_ref, on="月份", how="outer").merge(month_platform, on="月份", how="outer").merge(month_labor, on="月份", how="outer").merge(month_fixed, on="月份", how="outer").fillna(0)
+    monthly["可比经营贡献"] = monthly["营业实付"] - monthly["已退款金额"] - monthly["标准食材成本"] - monthly["平台成本"]
     monthly["情景经营结果"] = monthly["可比经营贡献"] - monthly["人工成本"] - monthly["固定费用"]
 
     bom = r.get("bom", pd.DataFrame())
     losses = r.get("losses", pd.DataFrame())
     loss_out = pd.DataFrame()
     if not losses.empty:
-        loss_out = pd.DataFrame({"月份": _text(_col_pos(losses, ("月份", "期间"), 0)), "门店编码": _text(_col_pos(losses, ("门店编码", "门店"), 1)), "原料编码": _text(_col_pos(losses, ("原料编码", "原料编号"), 2)), "期末结存数量": _num(_col_pos(losses, ("期末结存数量", "结存数量"), 3)), "盘点差异数量": _num(_col_pos(losses, ("盘点差异数量", "差异数量", "损耗数量", "门店盘差"), 5)), "单位": _text(_col_pos(losses, ("单位",), 4))})
+        loss_out = pd.DataFrame({"月份": _text(_col(losses, "月份", "期间", required=True)), "门店编码": _text(_col(losses, "门店编码", "门店", required=True)), "原料编码": _text(_col(losses, "原料编码", "原料编号", required=True)), "期末结存数量": _num(_col(losses, "期末结存数量", "结存数量")), "单位": _text(_col(losses, "单位")), "报损数量": _num(_col(losses, "报损数量", "损耗数量", "实际报损")), "盘点差异数量": _num(_col(losses, "盘点差异数量", "差异数量", "门店盘差"))})
         ing = r.get("ingredients", pd.DataFrame())
         if not ing.empty:
-            im = pd.DataFrame({"原料编码": _text(_col(ing, "原料编码", "原料编号", required=True)), "标准采购单价": _num(_col(ing, "标准采购单价", "标准采购价", "标准成本"))}).drop_duplicates("原料编码")
+            im = pd.DataFrame({"原料编码": _text(_col(ing, "原料编码", "原料编号", required=True)), "标准采购单价": _num(_col(ing, "标准采购单价", "标准采购价", "标准基础单价", "标准成本"))}).drop_duplicates("原料编码")
             loss_out = loss_out.merge(im, on="原料编码", how="left")
-            loss_out["报损金额"] = loss_out["盘点差异数量"].abs() * loss_out["标准采购单价"].fillna(0)
+        else:
+            loss_out["标准采购单价"] = math.nan
+        loss_out["报损金额"] = loss_out["报损数量"].abs() * loss_out["标准采购单价"]
+        loss_out["盘点差异金额"] = loss_out["盘点差异数量"].abs() * loss_out["标准采购单价"]
+        loss_out["估值状态"] = "已按标准采购单价估值"
+        loss_out.loc[loss_out["标准采购单价"].isna(), "估值状态"] = "无法估值：缺少标准采购单价"
     purchase = r.get("purchases", pd.DataFrame())
     purchase_out = pd.DataFrame()
+    purchase_exact_duplicates = 0
+    purchase_conflicts = 0
     if not purchase.empty:
         purchase_out = pd.DataFrame({"入库日期": _date(_col(purchase, "入库日期", "日期")), "入库单号": _text(_col(purchase, "入库单号", "入库单")), "门店编码": _text(_col(purchase, "门店编码", "门店")), "原料编码": _text(_col(purchase, "原料编码", "原料编号", required=True)), "采购数量": _num(_col(purchase, "采购数量", "数量")), "采购单价": _num(_col(purchase, "采购单价", "单价")), "状态": _text(_col(purchase, "状态"))})
+        purchase_out["精确重复"] = purchase_out.duplicated(keep="first")
+        purchase_exact_duplicates = int(purchase_out["精确重复"].sum())
+        purchase_out = purchase_out.loc[~purchase_out["精确重复"]].copy()
+        purchase_keys = ["入库单号", "门店编码", "原料编码"]
+        keyed = purchase_out["入库单号"].ne("")
+        duplicate_key = keyed & purchase_out.duplicated(purchase_keys, keep=False)
+        critical = ["入库日期", "采购数量", "采购单价", "状态"]
+        conflict_keys: set[tuple[Any, ...]] = set()
+        for key, group in purchase_out.loc[duplicate_key].groupby(purchase_keys, dropna=False):
+            if any(group[column].nunique(dropna=False) > 1 for column in critical):
+                conflict_keys.add(key if isinstance(key, tuple) else (key,))
+        purchase_out["业务键冲突"] = [
+            tuple(row[column] for column in purchase_keys) in conflict_keys
+            for _, row in purchase_out.iterrows()
+        ]
+        purchase_conflicts = int(purchase_out["业务键冲突"].sum())
+        consistent_duplicate = duplicate_key & ~purchase_out["业务键冲突"] & purchase_out.duplicated(purchase_keys, keep="first")
+        purchase_out = purchase_out.loc[~consistent_duplicate].copy()
         purchase_out["采购金额"] = purchase_out["采购数量"] * purchase_out["采购单价"]
-        purchase_out["纳入口径"] = ~purchase_out["状态"].str.contains("待验收|取消|作废", regex=True, na=False)
+        purchase_out["纳入口径"] = ~purchase_out["状态"].str.contains("待验收|取消|作废", regex=True, na=False) & ~purchase_out["业务键冲突"]
 
     reviews = r.get("reviews", pd.DataFrame())
     review_out = pd.DataFrame()
+    review_refund_out = pd.DataFrame()
     if not reviews.empty:
         review_out = pd.DataFrame({"日期": _date(_col(reviews, "日期", "评价日期")), "门店编码": _text(_col(reviews, "门店编码", "门店")), "订单号": _text(_col(reviews, "订单号", "订单编号")), "评分": _num(_col(reviews, "评分", "满意度")), "标签": _text(_col(reviews, "标签", "评价标签")), "评价摘要": _text(_col(reviews, "评价摘要", "内容"))})
         review_out["重点关注"] = review_out["评分"].lt(4) | review_out["标签"].str.contains("投诉|差评|食品|卫生|慢", regex=True, na=False)
+        refund_for_join = refunds.loc[refunds["已发生退款"], ["原订单号", "退款金额", "退款类型", "原因", "责任归属"]].copy()
+        refund_for_join = refund_for_join.groupby("原订单号", as_index=False).agg(
+            退款金额=("退款金额", "sum"),
+            退款类型=("退款类型", lambda values: "；".join(sorted(set(filter(None, values.astype(str)))))),
+            退款原因=("原因", lambda values: "；".join(sorted(set(filter(None, values.astype(str)))))),
+            责任归属=("责任归属", lambda values: "；".join(sorted(set(filter(None, values.astype(str)))))),
+        )
+        review_refund_out = review_out.merge(refund_for_join, left_on="订单号", right_on="原订单号", how="left")
+        review_refund_out["记录类型"] = "评价"
+        review_refund_out["退款匹配状态"] = review_refund_out["原订单号"].notna().map({True: "已匹配", False: "无已发生退款"})
+        orphan_refunds = refunds.loc[
+            refunds["已发生退款"] & ~refunds["原订单号"].isin(set(review_out["订单号"])),
+            ["原订单号", "退款金额", "退款类型", "原因", "责任归属"],
+        ].copy()
+        if not orphan_refunds.empty:
+            orphan_refunds["记录类型"] = "孤立退款"
+            orphan_refunds["退款匹配状态"] = "未匹配评价"
+            review_refund_out = pd.concat([review_refund_out, orphan_refunds], ignore_index=True, sort=False)
+    else:
+        review_refund_out = refunds.copy()
+        review_refund_out["记录类型"] = "孤立退款"
+        review_refund_out["退款匹配状态"] = "未提供评价表"
 
     risks = [{"优先级": "P0", "风险事项": "经营结果暂不可直接定性", "原因": "POS有效实付与人工/固定费用尺度明显不匹配", "影响": "可能是测试口径、期间或费用单位错误；直接下结论会误导决策", "责任部门": "财务/运营", "建议行动": "核对POS是否为完整季度、人工费用是否为年化/分店合计、固定费用期间和币种", "验收指标": "收入、成本、费用期间一致且可勾稽"}] if scale_mismatch else []
     if float(labor_out["加班工时"].sum()) > 0:
@@ -614,15 +710,16 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
         _fact("营业实付", total_sales, "元", src["pos"], "POS有效订单实付分摊合计", "经营规模事实"),
         _fact("已发生退款", total_refund, "元", src["refunds"], "仅统计状态为已退款/成功", "收入质量与售后敞口"),
         _fact("标准食材成本", standard_food, "元", src["pos"] + "+" + src["dishes"], "有效POS数量×菜品标准食材成本", "管理成本，不替代财务结转", "中"),
+        _fact("平台成本", float(settlement_out["可比平台成本"].sum()), "元", src["settlements"], "平台佣金+配送服务费+活动补贴承担；实际到账不再重复扣除", "外卖渠道成本", "高"),
         _fact("平台实际到账", float(settlement_out["实际到账"].sum()), "元", src["settlements"], "结算表实际到账合计，不冒充销售收入", "现金转化", "高"),
-        _fact("人工成本", float(labor_out["工资成本"].sum()), "元", src["labor"], "人工与工时表工资成本合计", "人力投入", "高"),
+        _fact("人工成本", float(labor_out["人工总成本"].sum()), "元", src["labor"], "工资成本+临时工成本+加班工资+其他人工；有源人工总成本时优先用于勾稽", "人力投入", "高"),
         _fact("固定费用", float(fixed_out["金额"].sum()), "元", src["fixed"], "固定运营费用金额合计", "期间费用", "高"),
         _fact("经营结果可用性", "需人工核验" if scale_mismatch else "可作管理情景参考", "状态", src["pos"] + "+" + src["labor"] + "+" + src["fixed"], "若收入小于人工与固定费用20%，不输出确定盈亏结论", "防止测试期间/单位错误造成误导", "高"),
     ])
     dashboard = pd.DataFrame([{
-        "KPI_销售规模": total_sales, "KPI_回款率": float(settlement_out["实际到账"].sum() / settlement_out["结算基数"].sum()) if settlement_out["结算基数"].sum() else math.nan,
+        "KPI_销售规模": total_sales, "KPI_平台到账率": float(settlement_out["实际到账"].sum() / settlement_out["结算基数"].sum()) if settlement_out["结算基数"].sum() else math.nan,
         "KPI_毛利标题": "退款后标准食材贡献率", "KPI_毛利率": (total_sales - total_refund - standard_food) / total_sales if total_sales else math.nan,
-        "KPI_估算经营结果": "需人工核验" if scale_mismatch else float(total_sales - total_refund - standard_food - labor_out["工资成本"].sum() - fixed_out["金额"].sum()), "KPI_风险订单": total_refund, "KPI_库存金额": float(loss_out["报损金额"].sum()) if not loss_out.empty else math.nan,
+        "KPI_估算经营结果": "需人工核验" if scale_mismatch else float(total_sales - total_refund - standard_food - settlement_out["可比平台成本"].sum() - labor_out["人工总成本"].sum() - fixed_out["金额"].sum()), "KPI_已发生退款": total_refund, "KPI_报损金额": float(loss_out["报损金额"].sum(min_count=1)) if not loss_out.empty else math.nan,
         "核心诊断": "收入与人工/固定费用尺度不匹配，当前只能给出经营线索，不能把情景结果当作真实净利润。" if scale_mismatch else "需结合渠道、菜品、人工和损耗共同改善经营贡献。",
         "风险卡1_标题": risk_df.iloc[0]["优先级"] + "｜" + str(risk_df.iloc[0]["风险事项"]), "风险卡1_证据": risk_df.iloc[0]["原因"], "风险卡1_行动": risk_df.iloc[0]["建议行动"],
         "风险卡2_标题": (risk_df.iloc[1]["优先级"] + "｜" + str(risk_df.iloc[1]["风险事项"])) if len(risk_df) > 1 else "暂无更多高优先级风险", "风险卡2_证据": risk_df.iloc[1]["原因"] if len(risk_df) > 1 else "未触发", "风险卡2_行动": risk_df.iloc[1]["建议行动"] if len(risk_df) > 1 else "持续监控",
@@ -641,13 +738,18 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
 
     audit = pd.DataFrame([
         {"检查项": "输入范围锁定", "结果": "通过", "说明": "仅使用本次任务明确选择的原始工作表，历史输出禁止回流"},
-        {"检查项": "POS精确重复", "结果": int(pos["精确重复"].sum()), "说明": "只删除完全相同记录，不按订单号删除多菜品明细"},
+        {"检查项": "POS精确重复发现", "结果": raw_duplicate_count, "说明": "删除前统计完全相同记录"},
+        {"检查项": "POS精确重复删除", "结果": raw_duplicate_count, "说明": "只删除完全相同记录，不按订单号删除多菜品明细"},
+        {"检查项": "POS精确重复剩余", "结果": int(pos["精确重复"].sum()), "说明": "去重后剩余精确重复应为0"},
         {"检查项": "退款映射覆盖", "结果": f"{int(refunds['原订单号'].isin(set(pos['订单号'])).sum())}/{len(refunds)}", "说明": "退款按原订单号回溯门店；无法匹配的记录保留并标记核验"},
+        {"检查项": "平台到账勾稽", "结果": f"最大差异{settlement_out['到账勾稽差异'].abs().max():,.2f}元", "说明": "结算基数-佣金-配送-活动补贴承担-退款冲减=实际到账"},
+        {"检查项": "采购重复与冲突", "结果": f"精确重复{purchase_exact_duplicates}条；业务键冲突{purchase_conflicts}条", "说明": "一致重复去重；同入库单/门店/原料关键字段冲突时不纳入口径"},
+        {"检查项": "损耗估值", "结果": f"无法估值{int(loss_out['标准采购单价'].isna().sum()) if not loss_out.empty else 0}条", "说明": "报损与盘点差异分列；缺价格时保留空值，不填0"},
         {"检查项": "经营尺度", "结果": "人工核验" if scale_mismatch else "通过", "说明": "销售、人工、固定费用期间/单位需业务确认"},
         {"检查项": "BOM/损耗", "结果": "管理代理指标", "说明": "没有完整期初+采购-销售-调整链时，损耗不是实际耗用；不强行补造"},
     ])
     sources_df = pd.DataFrame([{"来源角色": k, "工作表": src[k], "是否纳入": "是", "粒度": "独立事实/主数据"} for k in src])
-    outputs = {"管理层诊断总览": summary, "数据源与事实域": sources_df, "门店经营诊断": store, "渠道与外卖分析": settlement_out, "菜品盈利分析": dish_out, "原料采购与损耗": pd.concat([purchase_out, loss_out], axis=0, ignore_index=True, sort=False), "人工效率分析": labor_out, "客户评价与退款": pd.concat([review_out, refunds], axis=0, ignore_index=True, sort=False), "利润驱动分析": monthly, "风险行动计划": risk_df, "诊断底稿": pos, "数据口径与验收": audit, "经营诊断看板": dashboard}
+    outputs = {"管理层诊断总览": summary, "数据源与事实域": sources_df, "门店经营诊断": store, "渠道与外卖分析": settlement_out, "菜品盈利分析": dish_out, "原料采购与损耗": pd.concat([purchase_out, loss_out], axis=0, ignore_index=True, sort=False), "人工效率分析": labor_out, "客户评价与退款": review_refund_out, "利润驱动分析": monthly, "风险行动计划": risk_df, "诊断底稿": pos, "数据口径与验收": audit, "经营诊断看板": dashboard}
     report = {"schema_version": 1, "status": "ready", "summary": "已按餐饮多事实域重建门店、渠道、菜品、原料、人工、评价和退款分析；经营结果受数据期间/单位一致性约束。", "message": "已识别为餐饮门店经营诊断，输出跨表可追溯经营报告。", "warnings": ["标准食材成本是管理口径，不替代财务结转；情景结果若尺度不匹配仅供人工核验。", "外卖结算实际到账与POS销售分开披露，不能重复相加。"], "facts": summary.to_dict("records"), "risks": risk_df.to_dict("records"), "sources": sources_df.to_dict("records"), "report_kind": "restaurant_diagnosis_report"}
     for frame in outputs.values():
         frame.attrs["toolbox_report_kind"] = "restaurant_diagnosis_report"
