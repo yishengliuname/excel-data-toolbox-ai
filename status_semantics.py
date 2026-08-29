@@ -83,18 +83,18 @@ def classify_refund_status(value: object) -> str:
             "退款未完成",
             "尚未到账",
             "未到账",
-            "申请中",
             "处理中",
             "待审核",
             "待处理",
-            "退款申请",
         ),
     ):
         return REFUND_PENDING
     if _has(text, ("拒绝", "驳回", "已取消", "已关闭", "撤销")):
         return UNKNOWN
-    if _has(text, ("退款成功", "退款完成", "已退款", "已到账")):
+    if _has(text, ("退款成功", "退款完成", "已退款", "成功到账", "已到账")):
         return REFUND_CONFIRMED
+    if _has(text, ("退款申请", "申请中")):
+        return REFUND_PENDING
     return UNKNOWN
 
 

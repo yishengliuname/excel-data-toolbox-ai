@@ -688,6 +688,7 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
     purchase_out = pd.DataFrame()
     purchase_exact_duplicates = 0
     purchase_conflicts = 0
+    purchase_unit_unconverted = 0
     if not purchase.empty:
         purchase_out = pd.DataFrame({"入库日期": _date(_col(purchase, "入库日期", "日期")), "入库单号": _text(_col(purchase, "入库单号", "入库单")), "门店编码": _text(_col(purchase, "门店编码", "门店")), "原料编码": _text(_col(purchase, "原料编码", "原料编号", required=True)), "采购数量": _num(_col(purchase, "采购数量", "数量")), "采购单位": _text(_col(purchase, "采购单位", "计量单位", "单位")), "采购单价": _num(_col(purchase, "采购单价", "单价")), "状态": _text(_col(purchase, "状态"))})
         purchase_out["精确重复"] = purchase_out.duplicated(keep="first")
@@ -709,6 +710,48 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
         consistent_duplicate = duplicate_key & ~purchase_out["业务键冲突"] & purchase_out.duplicated(purchase_keys, keep="first")
         purchase_out = purchase_out.loc[~consistent_duplicate].copy()
         purchase_out["采购金额"] = purchase_out["采购数量"] * purchase_out["采购单价"]
+        ingredient_master = r.get("ingredients", pd.DataFrame())
+        if not ingredient_master.empty:
+            unit_master = pd.DataFrame(
+                {
+                    "原料编码": _text(_col(ingredient_master, "原料编码", "原料编号", required=True)),
+                    "主数据采购单位": _text(_col(ingredient_master, "采购单位", "包装单位")),
+                    "基础单位": _text(_col(ingredient_master, "基础单位", "基本单位", "库存单位")),
+                    "单位换算系数": _num(_col(ingredient_master, "单位换算", "换算系数", "单位转换系数")),
+                    "标准基础单价": _num(_col(ingredient_master, "标准基础单价", "标准采购单价", "标准采购价", "标准成本")),
+                }
+            ).drop_duplicates("原料编码", keep="last")
+            purchase_out = purchase_out.merge(unit_master, on="原料编码", how="left", validate="many_to_one")
+        else:
+            purchase_out["主数据采购单位"] = ""
+            purchase_out["基础单位"] = ""
+            purchase_out["单位换算系数"] = math.nan
+            purchase_out["标准基础单价"] = math.nan
+        purchase_unit_norm = purchase_out["采购单位"].map(_norm)
+        master_purchase_norm = purchase_out["主数据采购单位"].map(_norm)
+        base_unit_norm = purchase_out["基础单位"].map(_norm)
+        valid_factor = purchase_out["单位换算系数"].gt(0)
+        is_base_unit = purchase_unit_norm.ne("") & purchase_unit_norm.eq(base_unit_norm)
+        is_master_purchase_unit = (
+            purchase_unit_norm.ne("")
+            & purchase_unit_norm.eq(master_purchase_norm)
+            & valid_factor
+        )
+        purchase_out["本次换算系数"] = math.nan
+        purchase_out.loc[is_base_unit, "本次换算系数"] = 1.0
+        purchase_out.loc[is_master_purchase_unit & ~is_base_unit, "本次换算系数"] = purchase_out.loc[
+            is_master_purchase_unit & ~is_base_unit, "单位换算系数"
+        ]
+        purchase_out["折算基础数量"] = purchase_out["采购数量"] * purchase_out["本次换算系数"]
+        purchase_out["折算基础单价"] = purchase_out["采购金额"].div(
+            purchase_out["折算基础数量"].where(purchase_out["折算基础数量"].gt(0))
+        )
+        purchase_out["较标准基础单价偏差"] = purchase_out["折算基础单价"].div(
+            purchase_out["标准基础单价"].where(purchase_out["标准基础单价"].gt(0))
+        ) - 1
+        purchase_out["单位换算状态"] = "已折算"
+        purchase_out.loc[purchase_out["本次换算系数"].isna(), "单位换算状态"] = "人工核验：采购单位未匹配基础/采购单位或缺少换算系数"
+        purchase_unit_unconverted = int(purchase_out["本次换算系数"].isna().sum())
         purchase_out["状态语义"] = classify_status_series(purchase_out["状态"], classify_receipt_status)
         purchase_out["纳入口径"] = purchase_out["状态语义"].eq(RECEIPT_CONFIRMED) & ~purchase_out["业务键冲突"]
 
@@ -791,6 +834,7 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
         {"检查项": "退款映射覆盖", "结果": f"{int(refunds['原订单号'].isin(set(pos['订单号'])).sum())}/{len(refunds)}", "说明": "退款按原订单号回溯门店；无法匹配的记录保留并标记核验"},
         {"检查项": "平台到账勾稽", "结果": f"最大差异{settlement_out['到账勾稽差异'].abs().max():,.2f}元", "说明": "结算基数-佣金-配送-活动补贴承担-退款冲减=实际到账"},
         {"检查项": "采购重复与冲突", "结果": f"精确重复{purchase_exact_duplicates}条；业务键冲突{purchase_conflicts}条", "说明": "采购单位纳入业务键；一致重复去重，关键字段冲突不纳入口径"},
+        {"检查项": "采购基础单位换算", "结果": f"无法折算{purchase_unit_unconverted}条", "说明": "基础数量=采购数量×换算系数；基础单价=采购金额÷基础数量；不匹配时禁止猜测"},
         {"检查项": "双时间口径", "结果": "通过", "说明": "同时输出发生月视角与订单归属月视角；无法按订单回溯的费用保持空值"},
         {"检查项": "损耗估值", "结果": f"无法估值{int(loss_out['标准采购单价'].isna().sum()) if not loss_out.empty else 0}条", "说明": "报损与盘点差异分列；缺价格时保留空值，不填0"},
         {"检查项": "经营尺度", "结果": "人工核验" if scale_mismatch else "通过", "说明": "销售、人工、固定费用期间/单位需业务确认"},

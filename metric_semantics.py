@@ -18,6 +18,7 @@ import pandas as pd
 
 _NORMALISE = re.compile(r"[\s_\-（）()【】\[\]：:/.]+")
 _DATE = re.compile(r"日期|时间|月份|年月|期间|年度|季度|date|time|month|year|period", re.I)
+_DATE_FIELD = re.compile(r"(?:日期|时间|月份|年月|期间|年度|季度)$|^(?:date|time|month|year|period)$", re.I)
 _IDENTIFIER = re.compile(r"(^id$|编号|编码|单号|流水|序号|工号|账号|sku|code|no$)", re.I)
 _RATIO = re.compile(r"率|比例|占比|完成度|转化|margin|rate|ratio|percent", re.I)
 _SCORE = re.compile(r"评分|满意度|得分|指数|score|rating", re.I)
@@ -54,6 +55,8 @@ def classify_metric(name: Any) -> MetricSemantic:
     text = str(name or "").strip()
     if _IDENTIFIER.search(text):
         return MetricSemantic("identifier", "none", "", "标识字段，不参与数值聚合")
+    if _DATE_FIELD.search(normalise(text)):
+        return MetricSemantic("date", "none", "", "时间维度")
     if _DATE.search(text) and not (_ADDITIVE.search(text) or _COUNT.search(text) or _RATIO.search(text) or _SCORE.search(text)):
         return MetricSemantic("date", "none", "", "时间维度")
     if _RATIO.search(text):

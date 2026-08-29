@@ -100,6 +100,8 @@ class AnalysisCompilerTests(unittest.TestCase):
         )
         self.assertEqual(set(plan.fact_tables), {"订单事实", "退款事实"})
         self.assertEqual(len(plan.fact_indices), 2)
+        self.assertTrue(any(item.table_name == "退款事实" and item.field == "退款金额" for item in plan.fact_metrics))
+        self.assertTrue(any(item.table_name == "退款事实" and item.field == "退款日期" for item in plan.fact_dates))
         self.assertTrue(any(item.kind == "fact_overview" and "退款事实" in item.title for item in plan.analyses))
 
     def test_new_domain_can_be_added_only_by_configuration(self) -> None:

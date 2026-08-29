@@ -383,9 +383,9 @@ def build_adaptive_analysis_report(
         {"指标": "事实域清单", "结果": "、".join(compiled.fact_tables), "单位": "", "数据口径": "分析计划中的多事实图节点"},
         {"指标": "同构合并表", "结果": len(compatible), "单位": "张", "数据口径": "字段集合完全一致的期间/分表自动纵向合并"},
         {"指标": "主数据记录数", "结果": len(primary), "单位": "行", "数据口径": "同构表合并并删除完全重复行"},
-        {"指标": "识别数值指标", "结果": len(metric_columns), "单位": "个", "数据口径": "字段名、类型与数值解析率综合识别"},
-        {"指标": "识别分类维度", "结果": len(category_columns), "单位": "个", "数据口径": "低至中等基数的分类字段"},
-        {"指标": "识别时间字段", "结果": len(date_columns), "单位": "个", "数据口径": "字段名和日期解析率"},
+        {"指标": "识别数值指标", "结果": len(compiled.fact_metrics), "单位": "个", "数据口径": "全部事实表的字段名、类型与数值解析率综合识别"},
+        {"指标": "识别分类维度", "结果": len(compiled.fact_dimensions), "单位": "个", "数据口径": "全部事实表的低至中等基数分类字段"},
+        {"指标": "识别时间字段", "结果": len(compiled.fact_dates), "单位": "个", "数据口径": "全部事实表的字段名和日期解析率"},
         {"指标": "建议表关系", "结果": len(relation_frame), "单位": "条", "数据口径": "同名字段、值覆盖率和键唯一性推断"},
     ]
     for column in metric_columns[:6]:
@@ -431,14 +431,51 @@ def build_adaptive_analysis_report(
         total = float(grouped["指标值"].sum())
         for rank, (_, row) in enumerate(grouped.iterrows(), start=1):
             ranking_rows.append({
+                "来源事实表": primary_name,
                 "分析维度": dimension, "分类": _text(row[dimension]) or "（空值）", "指标字段": ranking_metric or "记录数",
                 "汇总方式": method, "指标值": float(row["指标值"]), "排名": rank,
                 "占比": float(row["指标值"] / total) if total else float("nan"),
             })
-    ranking = pd.DataFrame(ranking_rows, columns=["分析维度", "分类", "指标字段", "汇总方式", "指标值", "排名", "占比"])
+    for fact_index in compiled.fact_indices:
+        if fact_index == primary_local or fact_index in compatible:
+            continue
+        fact_frame = cleaned_frames[fact_index]
+        fact_metrics = [
+            field
+            for field in compiled.fact_metrics
+            if field.table_index == fact_index and field.aggregation in {"sum", "count", "distinct_count"}
+        ]
+        fact_dimensions = [field for field in compiled.fact_dimensions if field.table_index == fact_index]
+        if not fact_dimensions:
+            continue
+        fact_metric = fact_metrics[0] if fact_metrics else None
+        for dimension_binding in fact_dimensions[:2]:
+            dimension = dimension_binding.field
+            if fact_metric:
+                grouped = grouped_metric(fact_frame, dimension, fact_metric.field).rename(columns={fact_metric.field: "指标值"})
+                method = aggregate_metric(fact_frame, fact_metric.field)[1]
+                metric_name = fact_metric.field
+            else:
+                grouped = fact_frame.groupby(dimension, dropna=False, observed=True).size().reset_index(name="指标值")
+                method = "记录数"
+                metric_name = "记录数"
+            grouped = grouped.dropna(subset=["指标值"]).sort_values("指标值", ascending=False, kind="stable").head(top_n)
+            total = float(grouped["指标值"].sum())
+            for rank, (_, row) in enumerate(grouped.iterrows(), start=1):
+                ranking_rows.append({
+                    "来源事实表": compiled.table_profiles[fact_index].name,
+                    "分析维度": dimension,
+                    "分类": _text(row[dimension]) or "（空值）",
+                    "指标字段": metric_name,
+                    "汇总方式": method,
+                    "指标值": float(row["指标值"]),
+                    "排名": rank,
+                    "占比": float(row["指标值"] / total) if total else float("nan"),
+                })
+    ranking = pd.DataFrame(ranking_rows, columns=["来源事实表", "分析维度", "分类", "指标字段", "汇总方式", "指标值", "排名", "占比"])
 
     trend_metrics = aggregatable_metrics[:3]
-    trend = pd.DataFrame(columns=["月份", *trend_metrics])
+    trend = pd.DataFrame(columns=["来源事实表", "月份", *trend_metrics])
     if date_columns and trend_metrics:
         date_column = date_columns[0]
         trend_source = primary.copy(deep=True)
@@ -447,9 +484,37 @@ def build_adaptive_analysis_report(
         if not trend_source.empty:
             trend_source["月份"] = trend_source[date_column].dt.to_period("M").astype(str)
             trend = trend_source[["月份"]].drop_duplicates().sort_values("月份", kind="stable")
+            trend.insert(0, "来源事实表", primary_name)
             for column in trend_metrics:
                 grouped = grouped_metric(trend_source, "月份", column)
                 trend = trend.merge(grouped, on="月份", how="left")
+    primary_trend = trend.copy(deep=True)
+    for fact_index in compiled.fact_indices:
+        if fact_index == primary_local or fact_index in compatible:
+            continue
+        fact_dates = [field for field in compiled.fact_dates if field.table_index == fact_index]
+        fact_metrics = [
+            field
+            for field in compiled.fact_metrics
+            if field.table_index == fact_index and field.aggregation in {"sum", "count", "distinct_count"}
+        ]
+        if not fact_dates or not fact_metrics:
+            continue
+        fact_frame = cleaned_frames[fact_index].copy(deep=True)
+        date_field = fact_dates[0].field
+        fact_frame[date_field] = pd.to_datetime(fact_frame[date_field], errors="coerce", format="mixed")
+        fact_frame = fact_frame.dropna(subset=[date_field])
+        if fact_frame.empty:
+            continue
+        fact_frame["月份"] = fact_frame[date_field].dt.to_period("M").astype(str)
+        fact_trend = fact_frame[["月份"]].drop_duplicates().sort_values("月份", kind="stable")
+        fact_trend.insert(0, "来源事实表", compiled.table_profiles[fact_index].name)
+        for binding in fact_metrics[:3]:
+            grouped = grouped_metric(fact_frame, "月份", binding.field).rename(
+                columns={binding.field: f"{compiled.table_profiles[fact_index].name}.{binding.field}"}
+            )
+            fact_trend = fact_trend.merge(grouped, on="月份", how="left")
+        trend = pd.concat([trend, fact_trend], ignore_index=True, sort=False)
 
     anomaly_rows = []
     for column in metric_columns[:8]:
@@ -500,15 +565,16 @@ def build_adaptive_analysis_report(
         anomalies.groupby("异常类型", dropna=False, observed=True).size().reset_index(name="风险数量")
         if not anomalies.empty else pd.DataFrame(columns=["异常类型", "风险数量"])
     )
-    dashboard_rows = max(len(ranking.head(top_n)), len(trend), len(risk_summary), 1)
+    primary_ranking = ranking.loc[ranking["来源事实表"].eq(primary_name)] if not ranking.empty else ranking
+    top_rank = primary_ranking.loc[primary_ranking["分析维度"].eq(primary_ranking.iloc[0]["分析维度"])] if not primary_ranking.empty else primary_ranking
+    dashboard_rows = max(len(top_rank.head(top_n)), len(primary_trend), len(risk_summary), 1)
     dashboard = pd.DataFrame(index=range(dashboard_rows))
-    top_rank = ranking.loc[ranking["分析维度"].eq(ranking.iloc[0]["分析维度"])] if not ranking.empty else ranking
     for column in ("分类", "指标值"):
         dashboard[f"排名{column}"] = top_rank[column].reindex(range(dashboard_rows)) if column in top_rank else pd.NA
-    if not trend.empty:
-        dashboard["月份"] = trend["月份"].reindex(range(dashboard_rows))
+    if not primary_trend.empty:
+        dashboard["月份"] = primary_trend["月份"].reindex(range(dashboard_rows))
         for column in trend_metrics:
-            if column in trend: dashboard[f"趋势_{column}"] = trend[column].reindex(range(dashboard_rows))
+            if column in primary_trend: dashboard[f"趋势_{column}"] = primary_trend[column].reindex(range(dashboard_rows))
     if any(chart.kind == "composition" for chart in compiled.charts) and not top_rank.empty:
         dashboard["结构分类"] = top_rank["分类"].reindex(range(dashboard_rows))
         dashboard["结构指标值"] = top_rank["指标值"].reindex(range(dashboard_rows))
@@ -536,7 +602,7 @@ def build_adaptive_analysis_report(
         "intent_topics": list(compiled.intent_topics), "capabilities": list(compiled.capabilities),
         "missing_evidence": list(compiled.missing_evidence), "analysis_plan": compiled.as_dict(),
         "combined_table_count": len(compatible), "primary_row_count": len(primary),
-        "metric_count": len(metric_columns), "dimension_count": len(category_columns), "date_count": len(date_columns),
+        "metric_count": len(compiled.fact_metrics), "dimension_count": len(compiled.fact_dimensions), "date_count": len(compiled.fact_dates),
         "fact_count": len(compiled.fact_indices), "fact_tables": list(compiled.fact_tables),
         "relation_count": len(relation_frame), "anomaly_count": len(anomalies),
         "sheet_count": len(outputs), "chart_count": len(compiled.charts),

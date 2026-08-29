@@ -97,6 +97,8 @@ class AdaptiveReportTests(unittest.TestCase):
         overview = result.outputs["管理层通用总览"]
         assert result.report["fact_count"] == 2
         assert overview["指标"].astype(str).str.contains("事实域：退款事实.退款金额", regex=False).any()
+        assert result.outputs["分类排名"]["来源事实表"].eq("退款事实").any()
+        assert "退款事实.退款金额" in result.outputs["时间趋势"].columns
 
     def test_native_xlsx_export_contains_nine_sheets_and_charts(self) -> None:
         result = build_adaptive_analysis_report(

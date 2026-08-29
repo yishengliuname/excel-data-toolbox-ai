@@ -85,6 +85,9 @@ class CompiledAnalysisPlan:
     fact_tables: tuple[str, ...]
     table_profiles: tuple[TableProfile, ...]
     fields: tuple[FieldBinding, ...]
+    fact_metrics: tuple[FieldBinding, ...]
+    fact_dimensions: tuple[FieldBinding, ...]
+    fact_dates: tuple[FieldBinding, ...]
     metrics: tuple[str, ...]
     dimensions: tuple[str, ...]
     dates: tuple[str, ...]
@@ -387,7 +390,10 @@ def compile_analysis(
     concepts = {field.concept for field in fields if field.concept}
     topics = _intent_topics(user_request)
     fact_fields = [field for field in fields if field.table_index in fact_indices]
-    fact_metric_bindings = [field for field in fact_fields if field.role == "metric"]
+    fact_metric_bindings = sorted(
+        (field for field in fact_fields if field.role == "metric"),
+        key=lambda field: (field.table_index, _metric_sort_key(field)),
+    )
     fact_dimension_bindings = [field for field in fact_fields if field.role == "dimension"]
     fact_date_bindings = [field for field in fact_fields if field.role == "date"]
 
@@ -478,6 +484,8 @@ def compile_analysis(
         domain_id=str(domain["id"]), domain_label=str(domain["label"]), domain_confidence=domain_confidence,
         primary_index=primary_index, primary_table=primary.name, fact_indices=fact_indices, fact_tables=fact_tables,
         table_profiles=tuple(profiles), fields=tuple(fields),
+        fact_metrics=tuple(fact_metric_bindings), fact_dimensions=tuple(fact_dimension_bindings),
+        fact_dates=tuple(fact_date_bindings),
         metrics=metrics, dimensions=dimensions, dates=dates, identifiers=identifiers,
         intent_topics=topics, capabilities=tuple(sorted(capabilities)), missing_evidence=tuple(dict.fromkeys(missing)),
         analyses=tuple(analyses), charts=tuple(charts), warnings=tuple(warnings),

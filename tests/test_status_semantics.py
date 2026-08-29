@@ -30,6 +30,7 @@ def test_refund_status_requires_cash_confirmation() -> None:
     assert classify_refund_status("处理中") == REFUND_PENDING
     assert classify_refund_status("退款成功") == REFUND_CONFIRMED
     assert classify_refund_status("已退款") == REFUND_CONFIRMED
+    assert classify_refund_status("退款申请已成功到账") == REFUND_CONFIRMED
     assert classify_refund_status("申请已撤销") == UNKNOWN
 
 

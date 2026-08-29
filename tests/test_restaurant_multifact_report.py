@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
+import tempfile
 
+from openpyxl import load_workbook
 import pandas as pd
 
+from excel_data_toolbox.core import export_tables
 from excel_data_toolbox.metric_semantics import aggregate_metric, classify_metric, grouped_metric
 from excel_data_toolbox.restaurant_report import build_restaurant_diagnosis_report
 
@@ -36,7 +40,7 @@ def _multifact_fixture() -> tuple[list[pd.DataFrame], list[str]]:
             ],
             columns=["结算月份", "门店编码", "平台", "订单结算基数", "平台佣金", "配送服务费", "活动补贴承担", "退款冲减", "实际到账"],
         ),
-        pd.DataFrame({"原料编码": ["I1", "I2"], "原料名称": ["大米", "蔬菜"], "标准基础单价": [5.0, math.nan]}),
+        pd.DataFrame({"原料编码": ["I1", "I2"], "原料名称": ["大米", "蔬菜"], "采购单位": ["箱", "kg"], "基础单位": ["kg", "kg"], "单位换算": [10, 1], "标准基础单价": [5.0, math.nan]}),
         pd.DataFrame({"菜品编码": ["D1", "D2"], "原料编码": ["I1", "I2"], "标准用量": [0.2, 0.3]}),
         pd.DataFrame(
             [
@@ -163,6 +167,11 @@ def test_restaurant_purchase_deduplication_preserves_units() -> None:
     p3 = output.loc[output["入库单号"].eq("P3")]
     assert set(p3["采购单位"]) == {"箱", "kg"}
     assert p3["纳入口径"].all()
+    converted = p3.set_index("采购单位")
+    assert converted.loc["箱", "折算基础数量"] == 100
+    assert converted.loc["kg", "折算基础数量"] == 10
+    assert converted.loc["箱", "折算基础单价"] == 0.5
+    assert converted.loc["kg", "折算基础单价"] == 5
 
 
 def test_unknown_numeric_percentage_and_balance_semantics_are_conservative() -> None:
@@ -191,3 +200,30 @@ def test_percentage_text_is_scaled_to_decimal_in_compact_restaurant() -> None:
     result = build_restaurant_diagnosis_report([frame], source_names=["餐饮.xlsx__门店月度经营数据"])
     detail = result.outputs["诊断底稿"]
     assert detail.loc[0, "源利润率"] == 0.2
+
+
+def test_multifact_restaurant_final_xlsx_is_readable_and_preserves_dual_periods() -> None:
+    frames, names = _multifact_fixture()
+    result = build_restaurant_diagnosis_report(frames, source_names=names)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "餐饮多事实经营诊断.xlsx"
+        export_tables(result.outputs, path, include_log=False)
+        workbook = load_workbook(path, read_only=False, data_only=False)
+        try:
+            assert workbook.sheetnames == list(result.outputs)
+            sheet = workbook["利润驱动分析"]
+            header_row = next(
+                row
+                for row in range(1, min(sheet.max_row, 8) + 1)
+                if any(sheet.cell(row, column).value == "时间口径" for column in range(1, sheet.max_column + 1))
+            )
+            headers = [cell.value for cell in sheet[header_row]]
+            assert "时间口径" in headers
+            values = {
+                sheet.cell(row, headers.index("时间口径") + 1).value
+                for row in range(header_row + 1, sheet.max_row + 1)
+            }
+            assert {"发生月视角", "订单归属月视角"}.issubset(values)
+            assert "generated-workbook" in str(workbook.properties.keywords)
+        finally:
+            workbook.close()
