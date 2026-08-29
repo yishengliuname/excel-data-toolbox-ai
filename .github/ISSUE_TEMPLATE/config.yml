@@ -1,1 +1,9 @@
 blank_issues_enabled: false
+
+contact_links:
+  - name: Questions, use cases, and ideas
+    url: https://github.com/yishengliuname/excel-data-toolbox-ai/discussions
+    about: Ask for help or share an anonymized workflow before opening a code issue.
+  - name: Security vulnerability
+    url: https://github.com/yishengliuname/excel-data-toolbox-ai/security/policy
+    about: Report credentials, privacy, or security problems privately.

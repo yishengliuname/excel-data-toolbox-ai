@@ -10,6 +10,8 @@ An open-source, local-first AI workspace for turning messy Excel work into an au
 
 > Natural-language request → business plan → safe local execution → validated Excel report
 
+[Five-minute demo](docs/DEMO.md) · [Contributing](CONTRIBUTING.md) · [Contributor roadmap](docs/CONTRIBUTOR_ROADMAP.md)
+
 Upload one or more Excel/CSV files, describe the outcome you need, and let the system select the appropriate cleaning, joining, reconciliation, analysis, visualization, or delivery workflow. DeepSeek is optional: the deterministic local engine can still inspect, transform, validate, and export data without an API key.
 
 ## Why this project
@@ -121,6 +123,8 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 The key is read server-side only. It is not written into plans, logs, generated workbooks, screenshots, or the repository. Run `python scripts/check_secrets.py` before every public push.
 
 ## Development
+
+New to the project? Start with the [five-minute demo](docs/DEMO.md) and the [contributor roadmap](docs/CONTRIBUTOR_ROADMAP.md). Pick an issue labelled `good first issue` or `help wanted`, or discuss an idea in [GitHub Discussions](https://github.com/yishengliuname/excel-data-toolbox-ai/discussions) before opening a pull request.
 
 ```bash
 python scripts/check_secrets.py

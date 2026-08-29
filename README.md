@@ -6,6 +6,8 @@
 
 一句自然语言 → AI 规划 → 本地安全执行 → 可审计 Excel 交付。适合把真实客户的清洗、合并、对账、经营诊断和可视化需求，转换成可复用、可验收的工作流。
 
+[5 分钟演示](docs/DEMO.md) · [开始贡献](CONTRIBUTING.md) · [贡献者路线图](docs/CONTRIBUTOR_ROADMAP.md)
+
 这是一个开源、本地优先的 Excel 数据处理与经营分析工作台。上传数据后直接描述需求，系统会判断需要清洗、合并、对账、分析、可视化，还是生成 VBA、Power BI、数据库或人工核验交付物。数据计算和 Excel 图表在本机完成；启用 DeepSeek 时，默认只发送需求和表结构目录，不发送完整单元格原值。
 
 > **重要：本仓库不包含任何 API Key、客户文件或真实业务数据。** `.env`、`user_data/`、`outputs/`、Excel/CSV、数据库和日志均默认禁止提交。公开 Fork 前请运行 `python scripts/check_secrets.py`。
@@ -211,6 +213,8 @@ excel_data_toolbox/
 ## 参与贡献
 
 欢迎修复 Bug、改善图表、补充测试、扩展领域包和增强安全能力。提交 PR 前运行：
+
+如果你第一次参与，先看 [5 分钟演示](docs/DEMO.md) 和 [贡献者路线图](docs/CONTRIBUTOR_ROADMAP.md)，从标有 `good first issue` 或 `help wanted` 的任务开始。欢迎先在 [Discussions](https://github.com/yishengliuname/excel-data-toolbox-ai/discussions) 交流方案，再提交 PR。
 
 ```bash
 python scripts/check_secrets.py
