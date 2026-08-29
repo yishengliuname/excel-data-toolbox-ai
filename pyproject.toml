@@ -32,7 +32,7 @@ automation = [
   "Pillow>=11,<13",
   "pytesseract>=0.3.13,<1",
   "pyodbc>=5,<6",
-  "sqlglot>=27,<30",
+  "sqlglot>=27,<31",
 ]
 dev = [
   "pytest>=8,<10",
