@@ -1,5 +1,11 @@
 # 表格快处 AI｜本地优先的 Excel 智能工作台
 
+[![CI](https://github.com/yishengliuname/excel-data-toolbox-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/yishengliuname/excel-data-toolbox-ai/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/yishengliuname/excel-data-toolbox-ai/actions/workflows/codeql.yml/badge.svg)](https://github.com/yishengliuname/excel-data-toolbox-ai/actions/workflows/codeql.yml)
+[English README](README_EN.md)
+
+一句自然语言 → AI 规划 → 本地安全执行 → 可审计 Excel 交付。适合把真实客户的清洗、合并、对账、经营诊断和可视化需求，转换成可复用、可验收的工作流。
+
 这是一个开源、本地优先的 Excel 数据处理与经营分析工作台。上传数据后直接描述需求，系统会判断需要清洗、合并、对账、分析、可视化，还是生成 VBA、Power BI、数据库或人工核验交付物。数据计算和 Excel 图表在本机完成；启用 DeepSeek 时，默认只发送需求和表结构目录，不发送完整单元格原值。
 
 > **重要：本仓库不包含任何 API Key、客户文件或真实业务数据。** `.env`、`user_data/`、`outputs/`、Excel/CSV、数据库和日志均默认禁止提交。公开 Fork 前请运行 `python scripts/check_secrets.py`。
