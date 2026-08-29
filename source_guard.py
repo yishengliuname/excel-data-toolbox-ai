@@ -72,7 +72,7 @@ class GeneratedWorkbookAssessment:
 
 
 def detect_generated_workbook(path: str | Path) -> GeneratedWorkbookAssessment:
-    """Recognise a toolbox-produced management workbook from its sheet contract."""
+    """Recognise a toolbox output from immutable metadata or sheet contract."""
 
     source = Path(path)
     if source.suffix.lower() not in {".xlsx", ".xlsm"}:
@@ -80,8 +80,16 @@ def detect_generated_workbook(path: str | Path) -> GeneratedWorkbookAssessment:
     workbook = load_workbook(source, read_only=True, data_only=False, keep_links=False)
     try:
         sheet_names = tuple(str(name) for name in workbook.sheetnames)
+        keywords = str(workbook.properties.keywords or "")
+        identifier = str(workbook.properties.identifier or "")
     finally:
         workbook.close()
+    if "excel-data-toolbox-ai" in keywords and "generated-workbook" in keywords:
+        match = re.search(r"(?:^|;)report_kind=([^;]+)", keywords)
+        report_kind = match.group(1) if match else "Excel Data Toolbox AI输出"
+        if identifier.startswith("urn:uuid:"):
+            report_kind = report_kind or "Excel Data Toolbox AI输出"
+        return GeneratedWorkbookAssessment(True, report_kind, ("工作簿生成元数据",), sheet_names)
     sheet_set = set(sheet_names)
     best_kind = ""
     best_matches: set[str] = set()
@@ -185,6 +193,14 @@ def assess_prompt_data_alignment(
     for frame in frames:
         if isinstance(frame, pd.DataFrame):
             schema_parts.extend(str(column) for column in frame.columns)
+            # A small local-only value sample helps distinguish similarly named
+            # schemas (for example “渠道” in restaurant and e-commerce).  Values
+            # are never persisted or sent to an API by this guard.
+            for column in frame.columns:
+                series = frame[column].dropna()
+                if series.empty or series.nunique(dropna=True) > 30:
+                    continue
+                schema_parts.extend(series.astype("string").drop_duplicates().head(8).tolist())
     prompt_scores = _domain_scores(prompt)
     data_scores = _domain_scores(" ".join(schema_parts))
     prompt_domain, prompt_score, prompt_second = _top_domain(prompt_scores, minimum=2)

@@ -81,6 +81,23 @@ class AdaptiveReportTests(unittest.TestCase):
         self.assertFalse(result.outputs["分类排名"].empty)
         self.assertIn("推断依据", result.outputs["数据字典"].columns)
 
+    def test_secondary_fact_metrics_appear_in_management_overview(self) -> None:
+        orders = pd.DataFrame({
+            "订单日期": ["2026-01-01", "2026-01-02"], "订单号": ["O1", "O2"],
+            "渠道": ["线上", "门店"], "销售额": [100, 200],
+        })
+        refunds = pd.DataFrame({
+            "退款日期": ["2026-02-01", "2026-02-02"], "退款单号": ["R1", "R2"],
+            "原因": ["质量", "时效"], "退款金额": [20, 30],
+        })
+        result = build_adaptive_analysis_report(
+            [orders, refunds], source_names=["订单事实", "退款事实"],
+            user_request="关联订单和退款分析经营情况",
+        )
+        overview = result.outputs["管理层通用总览"]
+        assert result.report["fact_count"] == 2
+        assert overview["指标"].astype(str).str.contains("事实域：退款事实.退款金额", regex=False).any()
+
     def test_native_xlsx_export_contains_nine_sheets_and_charts(self) -> None:
         result = build_adaptive_analysis_report(
             _unfamiliar_tables(),

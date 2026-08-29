@@ -379,6 +379,8 @@ def build_adaptive_analysis_report(
         {"指标": "主数据粒度", "结果": " + ".join(compiled.table_profiles[primary_local].grain) or "待人工确认", "单位": "", "数据口径": "按日期、标识符和分类维度推断"},
         {"指标": "上传数据表", "结果": len(valid_frames), "单位": "张", "数据口径": "非空工作表数量"},
         {"指标": "主分析表", "结果": primary_name, "单位": "", "数据口径": "按行列规模、数值/日期/分类字段丰富度自动选择"},
+        {"指标": "识别事实域", "结果": len(compiled.fact_indices), "单位": "张", "数据口径": "每张事实表保持原始粒度；主表只用于默认明细展示"},
+        {"指标": "事实域清单", "结果": "、".join(compiled.fact_tables), "单位": "", "数据口径": "分析计划中的多事实图节点"},
         {"指标": "同构合并表", "结果": len(compatible), "单位": "张", "数据口径": "字段集合完全一致的期间/分表自动纵向合并"},
         {"指标": "主数据记录数", "结果": len(primary), "单位": "行", "数据口径": "同构表合并并删除完全重复行"},
         {"指标": "识别数值指标", "结果": len(metric_columns), "单位": "个", "数据口径": "字段名、类型与数值解析率综合识别"},
@@ -393,6 +395,27 @@ def build_adaptive_analysis_report(
         result, method, semantic = aggregate_metric(primary, column)
         unit = semantic.unit or ("%/分" if primary_roles[column]["role"] == "比例/评分" else "")
         overview_rows.append({"指标": f"核心指标：{column}", "结果": result, "单位": unit, "数据口径": method})
+    for fact_index in compiled.fact_indices:
+        if fact_index == primary_local:
+            continue
+        fact_frame = cleaned_frames[fact_index]
+        safe_fields = [
+            field
+            for field in compiled.fields
+            if field.table_index == fact_index
+            and field.role == "metric"
+            and field.aggregation in {"sum", "count", "distinct_count", "end_balance"}
+        ]
+        for field in safe_fields[:3]:
+            result, method, semantic = aggregate_metric(fact_frame, field.field)
+            overview_rows.append(
+                {
+                    "指标": f"事实域：{compiled.table_profiles[fact_index].name}.{field.field}",
+                    "结果": result,
+                    "单位": semantic.unit,
+                    "数据口径": f"独立事实表聚合；{method}",
+                }
+            )
     overview = pd.DataFrame(overview_rows)
 
     ranking_rows = []
@@ -514,6 +537,7 @@ def build_adaptive_analysis_report(
         "missing_evidence": list(compiled.missing_evidence), "analysis_plan": compiled.as_dict(),
         "combined_table_count": len(compatible), "primary_row_count": len(primary),
         "metric_count": len(metric_columns), "dimension_count": len(category_columns), "date_count": len(date_columns),
+        "fact_count": len(compiled.fact_indices), "fact_tables": list(compiled.fact_tables),
         "relation_count": len(relation_frame), "anomaly_count": len(anomalies),
         "sheet_count": len(outputs), "chart_count": len(compiled.charts),
     }

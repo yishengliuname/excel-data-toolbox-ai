@@ -14,8 +14,30 @@ import pandas as pd
 
 try:
     from .metric_semantics import classify_sheet_role
+    from .status_semantics import (
+        ORDER_INVALID,
+        ORDER_SUCCESS,
+        RECEIPT_CONFIRMED,
+        REFUND_CONFIRMED,
+        REFUND_PENDING,
+        classify_order_status,
+        classify_receipt_status,
+        classify_refund_status,
+        classify_status_series,
+    )
 except ImportError:  # Supports: python restaurant_report.py
     from excel_data_toolbox.metric_semantics import classify_sheet_role
+    from excel_data_toolbox.status_semantics import (
+        ORDER_INVALID,
+        ORDER_SUCCESS,
+        RECEIPT_CONFIRMED,
+        REFUND_CONFIRMED,
+        REFUND_PENDING,
+        classify_order_status,
+        classify_receipt_status,
+        classify_refund_status,
+        classify_status_series,
+    )
 
 
 ROLE_ALIASES: Mapping[str, tuple[str, ...]] = {
@@ -531,9 +553,8 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
         "订单状态": _text(_col(pos_raw, "订单状态", "状态")),
         "支付方式": _text(_col(pos_raw, "支付方式", "支付")),
     })
-    pos["有效订单"] = pos["订单状态"].str.contains("完成|已完成|结账|支付", regex=True, na=False)
-    if not pos["有效订单"].any():
-        pos["有效订单"] = ~pos["订单状态"].str.contains("取消|关闭|退款", regex=True, na=False)
+    pos["状态语义"] = classify_status_series(pos["订单状态"], classify_order_status)
+    pos["有效订单"] = pos["状态语义"].eq(ORDER_SUCCESS)
     pos["精确重复"] = pos.duplicated(keep="first")
     raw_duplicate_count = int(pos["精确重复"].sum())
     pos = pos.loc[~pos["精确重复"]].copy()
@@ -543,8 +564,13 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
 
     refund_raw = r["refunds"]
     refunds = pd.DataFrame({"退款日期": _date(_col(refund_raw, "退款日期", "申请日期", "日期")), "退款单号": _text(_col(refund_raw, "退款单号", "售后单号")), "原订单号": _text(_col(refund_raw, "原订单号", "订单号", required=True)), "退款类型": _text(_col(refund_raw, "退款类型", "售后类型")), "退款金额": _num(_col(refund_raw, "退款金额", "金额", required=True)), "状态": _text(_col(refund_raw, "状态", "售后状态")), "原因": _text(_col(refund_raw, "原因", "退款原因")), "责任归属": _text(_col(refund_raw, "责任归属", "归属"))})
-    refunds["已发生退款"] = refunds["状态"].str.contains("已退款|退款成功|完成", regex=True, na=False)
-    refunds["处理中"] = refunds["状态"].str.contains("处理中|申请中", regex=True, na=False)
+    refunds["状态语义"] = classify_status_series(refunds["状态"], classify_refund_status)
+    refunds["已发生退款"] = refunds["状态语义"].eq(REFUND_CONFIRMED)
+    refunds["处理中"] = refunds["状态语义"].eq(REFUND_PENDING)
+    order_month = pos[["订单号", "月份"]].drop_duplicates("订单号").rename(columns={"月份": "订单归属月份"})
+    refunds = refunds.merge(order_month, left_on="原订单号", right_on="订单号", how="left", validate="many_to_one")
+    refunds = refunds.drop(columns=["订单号"], errors="ignore")
+    refunds["退款发生月份"] = _month(refunds["退款日期"])
     refund_by_order = refunds.loc[refunds["已发生退款"]].groupby("原订单号", as_index=False)["退款金额"].sum().rename(columns={"退款金额": "已退款金额"})
     pos = pos.merge(refund_by_order, left_on="订单号", right_on="原订单号", how="left").drop(columns=["原订单号"], errors="ignore")
     pos["已退款金额"] = pos["已退款金额"].fillna(0)
@@ -617,13 +643,31 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
     dish_out["管理提示"] = dish_out.apply(lambda x: "高销量低贡献，检查定价/折扣/BOM" if x["贡献率"] < low_margin_threshold else "正常" if pd.notna(x["贡献率"]) else "标准成本缺失，人工核验", axis=1)
 
     month_sales = valid.groupby("月份", as_index=False).agg(营业实付=("实付分摊", "sum"), 标准食材成本=("标准食材成本金额", "sum"))
-    month_ref = refunds.loc[refunds["已发生退款"]].assign(月份=_month(refunds.loc[refunds["已发生退款"], "退款日期"])).groupby("月份", as_index=False)["退款金额"].sum().rename(columns={"退款金额": "已退款金额"})
+    confirmed_refunds = refunds.loc[refunds["已发生退款"]].copy()
+    month_ref = confirmed_refunds.groupby("退款发生月份", as_index=False)["退款金额"].sum().rename(columns={"退款发生月份": "月份", "退款金额": "已退款金额"})
     month_labor = labor_out.groupby("月份", as_index=False).agg(人工成本=("人工总成本", "sum"), 加班工时=("加班工时", "sum"))
     month_platform = settlement_out.groupby("结算月份", as_index=False)["可比平台成本"].sum().rename(columns={"结算月份": "月份", "可比平台成本": "平台成本"})
     month_fixed = fixed_out.groupby("月份", as_index=False)["金额"].sum().rename(columns={"金额": "固定费用"})
-    monthly = month_sales.merge(month_ref, on="月份", how="outer").merge(month_platform, on="月份", how="outer").merge(month_labor, on="月份", how="outer").merge(month_fixed, on="月份", how="outer").fillna(0)
-    monthly["可比经营贡献"] = monthly["营业实付"] - monthly["已退款金额"] - monthly["标准食材成本"] - monthly["平台成本"]
-    monthly["情景经营结果"] = monthly["可比经营贡献"] - monthly["人工成本"] - monthly["固定费用"]
+    monthly_occurrence = month_sales.merge(month_ref, on="月份", how="outer").merge(month_platform, on="月份", how="outer").merge(month_labor, on="月份", how="outer").merge(month_fixed, on="月份", how="outer")
+    occurrence_amounts = ["营业实付", "已退款金额", "标准食材成本", "平台成本", "人工成本", "加班工时", "固定费用"]
+    monthly_occurrence[occurrence_amounts] = monthly_occurrence[occurrence_amounts].fillna(0)
+    monthly_occurrence["可比经营贡献"] = monthly_occurrence["营业实付"] - monthly_occurrence["已退款金额"] - monthly_occurrence["标准食材成本"] - monthly_occurrence["平台成本"]
+    monthly_occurrence["情景经营结果"] = monthly_occurrence["可比经营贡献"] - monthly_occurrence["人工成本"] - monthly_occurrence["固定费用"]
+    monthly_occurrence["时间口径"] = "发生月视角"
+    monthly_occurrence["口径说明"] = "销售按营业月、退款按退款发生月、平台按结算月、人工和固定费用按发生月"
+
+    attributed_refunds = confirmed_refunds.dropna(subset=["订单归属月份"]).groupby("订单归属月份", as_index=False)["退款金额"].sum().rename(columns={"订单归属月份": "月份", "退款金额": "已退款金额"})
+    monthly_attributed = month_sales.merge(attributed_refunds, on="月份", how="outer")
+    monthly_attributed[["营业实付", "已退款金额", "标准食材成本"]] = monthly_attributed[["营业实付", "已退款金额", "标准食材成本"]].fillna(0)
+    monthly_attributed["平台成本"] = math.nan
+    monthly_attributed["人工成本"] = math.nan
+    monthly_attributed["加班工时"] = math.nan
+    monthly_attributed["固定费用"] = math.nan
+    monthly_attributed["可比经营贡献"] = monthly_attributed["营业实付"] - monthly_attributed["已退款金额"] - monthly_attributed["标准食材成本"]
+    monthly_attributed["情景经营结果"] = math.nan
+    monthly_attributed["时间口径"] = "订单归属月视角"
+    monthly_attributed["口径说明"] = "退款回溯原订单营业月；平台结算、人工和固定费用缺少订单键，不强行回溯"
+    monthly = pd.concat([monthly_occurrence, monthly_attributed], ignore_index=True, sort=False).sort_values(["时间口径", "月份"], kind="stable")
 
     bom = r.get("bom", pd.DataFrame())
     losses = r.get("losses", pd.DataFrame())
@@ -645,11 +689,11 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
     purchase_exact_duplicates = 0
     purchase_conflicts = 0
     if not purchase.empty:
-        purchase_out = pd.DataFrame({"入库日期": _date(_col(purchase, "入库日期", "日期")), "入库单号": _text(_col(purchase, "入库单号", "入库单")), "门店编码": _text(_col(purchase, "门店编码", "门店")), "原料编码": _text(_col(purchase, "原料编码", "原料编号", required=True)), "采购数量": _num(_col(purchase, "采购数量", "数量")), "采购单价": _num(_col(purchase, "采购单价", "单价")), "状态": _text(_col(purchase, "状态"))})
+        purchase_out = pd.DataFrame({"入库日期": _date(_col(purchase, "入库日期", "日期")), "入库单号": _text(_col(purchase, "入库单号", "入库单")), "门店编码": _text(_col(purchase, "门店编码", "门店")), "原料编码": _text(_col(purchase, "原料编码", "原料编号", required=True)), "采购数量": _num(_col(purchase, "采购数量", "数量")), "采购单位": _text(_col(purchase, "采购单位", "计量单位", "单位")), "采购单价": _num(_col(purchase, "采购单价", "单价")), "状态": _text(_col(purchase, "状态"))})
         purchase_out["精确重复"] = purchase_out.duplicated(keep="first")
         purchase_exact_duplicates = int(purchase_out["精确重复"].sum())
         purchase_out = purchase_out.loc[~purchase_out["精确重复"]].copy()
-        purchase_keys = ["入库单号", "门店编码", "原料编码"]
+        purchase_keys = ["入库单号", "门店编码", "原料编码", "采购单位"]
         keyed = purchase_out["入库单号"].ne("")
         duplicate_key = keyed & purchase_out.duplicated(purchase_keys, keep=False)
         critical = ["入库日期", "采购数量", "采购单价", "状态"]
@@ -665,7 +709,8 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
         consistent_duplicate = duplicate_key & ~purchase_out["业务键冲突"] & purchase_out.duplicated(purchase_keys, keep="first")
         purchase_out = purchase_out.loc[~consistent_duplicate].copy()
         purchase_out["采购金额"] = purchase_out["采购数量"] * purchase_out["采购单价"]
-        purchase_out["纳入口径"] = ~purchase_out["状态"].str.contains("待验收|取消|作废", regex=True, na=False) & ~purchase_out["业务键冲突"]
+        purchase_out["状态语义"] = classify_status_series(purchase_out["状态"], classify_receipt_status)
+        purchase_out["纳入口径"] = purchase_out["状态语义"].eq(RECEIPT_CONFIRMED) & ~purchase_out["业务键冲突"]
 
     reviews = r.get("reviews", pd.DataFrame())
     review_out = pd.DataFrame()
@@ -726,7 +771,7 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
         "风险卡3_标题": (risk_df.iloc[2]["优先级"] + "｜" + str(risk_df.iloc[2]["风险事项"])) if len(risk_df) > 2 else "暂无更多高优先级风险", "风险卡3_证据": risk_df.iloc[2]["原因"] if len(risk_df) > 2 else "未触发", "风险卡3_行动": risk_df.iloc[2]["建议行动"] if len(risk_df) > 2 else "持续监控",
     }])
     # Hidden/helper columns are intentionally explicit so the dashboard charts are data-driven.
-    dashboard = pd.concat([dashboard, monthly.rename(columns={"月份": "月份", "营业实付": "营业实付", "标准食材成本": "标准食材成本", "人工成本": "人工成本", "固定费用": "固定费用", "情景经营结果": "情景经营结果"})], ignore_index=True, sort=False)
+    dashboard = pd.concat([dashboard, monthly_occurrence], ignore_index=True, sort=False)
     dashboard["门店_门店"] = None; dashboard["门店_可比经营贡献"] = None
     n_store = min(len(store), len(dashboard)); dashboard.loc[: n_store-1, "门店_门店"] = store.get("门店名称", store["门店编码"]).tolist()[:n_store]; dashboard.loc[: n_store-1, "门店_可比经营贡献"] = store["可比经营贡献"].tolist()[:n_store]
     dashboard["渠道_渠道"] = None; dashboard["渠道_可比经营贡献"] = None
@@ -741,9 +786,12 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
         {"检查项": "POS精确重复发现", "结果": raw_duplicate_count, "说明": "删除前统计完全相同记录"},
         {"检查项": "POS精确重复删除", "结果": raw_duplicate_count, "说明": "只删除完全相同记录，不按订单号删除多菜品明细"},
         {"检查项": "POS精确重复剩余", "结果": int(pos["精确重复"].sum()), "说明": "去重后剩余精确重复应为0"},
+        {"检查项": "POS未知状态", "结果": int((~pos["状态语义"].isin([ORDER_SUCCESS, ORDER_INVALID])).sum()), "说明": "未知状态不计入有效销售，需人工核验；负向状态优先"},
+        {"检查项": "退款未知状态", "结果": int((~refunds["状态语义"].isin([REFUND_CONFIRMED, REFUND_PENDING])).sum()), "说明": "未知退款状态不冲减已实现收入，单独披露"},
         {"检查项": "退款映射覆盖", "结果": f"{int(refunds['原订单号'].isin(set(pos['订单号'])).sum())}/{len(refunds)}", "说明": "退款按原订单号回溯门店；无法匹配的记录保留并标记核验"},
         {"检查项": "平台到账勾稽", "结果": f"最大差异{settlement_out['到账勾稽差异'].abs().max():,.2f}元", "说明": "结算基数-佣金-配送-活动补贴承担-退款冲减=实际到账"},
-        {"检查项": "采购重复与冲突", "结果": f"精确重复{purchase_exact_duplicates}条；业务键冲突{purchase_conflicts}条", "说明": "一致重复去重；同入库单/门店/原料关键字段冲突时不纳入口径"},
+        {"检查项": "采购重复与冲突", "结果": f"精确重复{purchase_exact_duplicates}条；业务键冲突{purchase_conflicts}条", "说明": "采购单位纳入业务键；一致重复去重，关键字段冲突不纳入口径"},
+        {"检查项": "双时间口径", "结果": "通过", "说明": "同时输出发生月视角与订单归属月视角；无法按订单回溯的费用保持空值"},
         {"检查项": "损耗估值", "结果": f"无法估值{int(loss_out['标准采购单价'].isna().sum()) if not loss_out.empty else 0}条", "说明": "报损与盘点差异分列；缺价格时保留空值，不填0"},
         {"检查项": "经营尺度", "结果": "人工核验" if scale_mismatch else "通过", "说明": "销售、人工、固定费用期间/单位需业务确认"},
         {"检查项": "BOM/损耗", "结果": "管理代理指标", "说明": "没有完整期初+采购-销售-调整链时，损耗不是实际耗用；不强行补造"},

@@ -80,6 +80,28 @@ class AnalysisCompilerTests(unittest.TestCase):
         self.assertEqual(plan.primary_table, "POS销售明细")
         self.assertEqual(plan.table_profiles[0].role, "summary")
 
+    def test_multiple_fact_tables_are_preserved_in_analysis_graph(self) -> None:
+        orders = pd.DataFrame({
+            "订单日期": ["2026-01-01", "2026-01-02"],
+            "订单号": ["O1", "O2"],
+            "渠道": ["线上", "门店"],
+            "销售额": [100, 200],
+        })
+        refunds = pd.DataFrame({
+            "退款日期": ["2026-02-01", "2026-02-02"],
+            "退款单号": ["R1", "R2"],
+            "原因": ["质量", "时效"],
+            "退款金额": [20, 30],
+        })
+        plan = compile_analysis(
+            [orders, refunds],
+            source_names=["订单事实", "退款事实"],
+            user_request="关联订单和退款，分析销售、退款和趋势",
+        )
+        self.assertEqual(set(plan.fact_tables), {"订单事实", "退款事实"})
+        self.assertEqual(len(plan.fact_indices), 2)
+        self.assertTrue(any(item.kind == "fact_overview" and "退款事实" in item.title for item in plan.analyses))
+
     def test_new_domain_can_be_added_only_by_configuration(self) -> None:
         payload = {
             "schema_version": 1,

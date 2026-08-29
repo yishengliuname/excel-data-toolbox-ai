@@ -81,6 +81,8 @@ class CompiledAnalysisPlan:
     domain_confidence: float
     primary_index: int
     primary_table: str
+    fact_indices: tuple[int, ...]
+    fact_tables: tuple[str, ...]
     table_profiles: tuple[TableProfile, ...]
     fields: tuple[FieldBinding, ...]
     metrics: tuple[str, ...]
@@ -373,6 +375,10 @@ def compile_analysis(
 
     primary_index = max(range(len(profiles)), key=lambda index: profiles[index].fact_score)
     primary = profiles[primary_index]
+    fact_indices = tuple(profile.index for profile in profiles if profile.role == "fact")
+    if not fact_indices:
+        fact_indices = (primary_index,)
+    fact_tables = tuple(profiles[index].name for index in fact_indices)
     primary_fields = [field for field in fields if field.table_index == primary_index]
     metric_bindings = sorted((field for field in primary_fields if field.role == "metric"), key=_metric_sort_key)
     dimension_bindings = [field for field in primary_fields if field.role == "dimension"]
@@ -380,11 +386,15 @@ def compile_analysis(
     identifier_bindings = [field for field in primary_fields if field.role == "identifier"]
     concepts = {field.concept for field in fields if field.concept}
     topics = _intent_topics(user_request)
+    fact_fields = [field for field in fields if field.table_index in fact_indices]
+    fact_metric_bindings = [field for field in fact_fields if field.role == "metric"]
+    fact_dimension_bindings = [field for field in fact_fields if field.role == "dimension"]
+    fact_date_bindings = [field for field in fact_fields if field.role == "date"]
 
     capabilities = {"overview", "quality", "anomaly"}
-    if metric_bindings and dimension_bindings:
+    if fact_metric_bindings and fact_dimension_bindings:
         capabilities.add("ranking")
-    if metric_bindings and date_bindings:
+    if fact_metric_bindings and fact_date_bindings:
         capabilities.add("trend")
     if len(valid_frames) > 1:
         capabilities.add("relationships")
@@ -416,6 +426,26 @@ def compile_analysis(
     dates = tuple(field.field for field in date_bindings[:4])
     identifiers = tuple(field.field for field in identifier_bindings[:6])
     analyses: list[AnalysisSpec] = [AnalysisSpec("overview", "核心经营指标", reason="按指标语义选择求和、期末、平均或加权比率")]
+    for index in fact_indices:
+        if index == primary_index:
+            continue
+        profile = profiles[index]
+        safe_metric = next(
+            (
+                field.field
+                for field in fields
+                if field.table_index == index and field.role == "metric" and field.aggregation != "unknown"
+            ),
+            "",
+        )
+        analyses.append(
+            AnalysisSpec(
+                "fact_overview",
+                f"{profile.name}事实域摘要",
+                metric=safe_metric,
+                reason="多事实图保留各事实表原始粒度，不把所有指标压到单一主表",
+            )
+        )
     if "ranking" in capabilities:
         analyses.append(AnalysisSpec("ranking", f"{dimensions[0]}表现排名", metric=metrics[0], dimension=dimensions[0], reason="存在可分组维度和可聚合指标"))
     if "trend" in capabilities:
@@ -446,7 +476,8 @@ def compile_analysis(
         warnings.append("主分析表未识别到可靠数值指标，仅生成结构和数据质量审计")
     return CompiledAnalysisPlan(
         domain_id=str(domain["id"]), domain_label=str(domain["label"]), domain_confidence=domain_confidence,
-        primary_index=primary_index, primary_table=primary.name, table_profiles=tuple(profiles), fields=tuple(fields),
+        primary_index=primary_index, primary_table=primary.name, fact_indices=fact_indices, fact_tables=fact_tables,
+        table_profiles=tuple(profiles), fields=tuple(fields),
         metrics=metrics, dimensions=dimensions, dates=dates, identifiers=identifiers,
         intent_topics=topics, capabilities=tuple(sorted(capabilities)), missing_evidence=tuple(dict.fromkeys(missing)),
         analyses=tuple(analyses), charts=tuple(charts), warnings=tuple(warnings),

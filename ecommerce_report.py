@@ -9,6 +9,17 @@ from typing import Any, Mapping, Sequence
 import pandas as pd
 
 from .semantic_model import assess_relationship, clean_key, find_column, infer_table_roles
+from .status_semantics import (
+    ORDER_INVALID,
+    ORDER_SUCCESS,
+    RECEIPT_CONFIRMED,
+    REFUND_CONFIRMED,
+    REFUND_PENDING,
+    classify_order_status,
+    classify_receipt_status,
+    classify_refund_status,
+    classify_status_series,
+)
 
 _ROLE_SPECS: Mapping[str, Mapping[str, Sequence[str]]] = {
     "products": {
@@ -180,9 +191,10 @@ def build_ecommerce_diagnosis_report(
     orders["月份"] = orders["下单日期"].dt.to_period("M").astype("string")
     order_duplicate_rows = int(orders.duplicated(keep="first").sum())
     orders = orders.drop_duplicates(keep="first").copy()
-    invalid_pattern = r"取消|待付款|关闭|作废|未支付"
-    valid_orders = orders.loc[~orders["订单状态"].str.contains(invalid_pattern, na=False)].copy()
-    invalid_orders = orders.loc[orders["订单状态"].str.contains(invalid_pattern, na=False)].copy()
+    orders["状态语义"] = classify_status_series(orders["订单状态"], classify_order_status)
+    valid_orders = orders.loc[orders["状态语义"].eq(ORDER_SUCCESS)].copy()
+    invalid_orders = orders.loc[orders["状态语义"].eq(ORDER_INVALID)].copy()
+    unknown_orders = orders.loc[~orders["状态语义"].isin([ORDER_SUCCESS, ORDER_INVALID])].copy()
     valid_orders = valid_orders.merge(products, on="SKU", how="left", suffixes=("", "_主数据"), validate="many_to_one")
     valid_orders["标准商品成本"] = valid_orders["数量"] * valid_orders["标准单位成本"]
     valid_orders["折扣率"] = valid_orders["优惠金额"] / valid_orders["商品原价"].where(valid_orders["商品原价"].ne(0))
@@ -200,10 +212,12 @@ def build_ecommerce_diagnosis_report(
             "原因": _col(refunds_raw, "原因", required=False).astype("string").str.strip(),
         }
     )
-    order_keys = valid_orders[["订单号", "渠道", "客户ID", "月份"]].drop_duplicates("订单号")
+    order_keys = valid_orders[["订单号", "渠道", "客户ID", "月份"]].drop_duplicates("订单号").rename(columns={"月份": "订单归属月份"})
     refunds = refunds.merge(order_keys, left_on="原订单号", right_on="订单号", how="left", validate="many_to_one")
-    occurred_refunds = refunds.loc[refunds["售后状态"].str.contains("已退款|退款成功", na=False)].copy()
-    pending_refunds = refunds.loc[~refunds.index.isin(occurred_refunds.index)].copy()
+    refunds["退款发生月份"] = refunds["申请日期"].dt.to_period("M").astype("string")
+    refunds["状态语义"] = classify_status_series(refunds["售后状态"], classify_refund_status)
+    occurred_refunds = refunds.loc[refunds["状态语义"].eq(REFUND_CONFIRMED)].copy()
+    pending_refunds = refunds.loc[~refunds["状态语义"].eq(REFUND_CONFIRMED)].copy()
 
     settlements = pd.DataFrame(
         {
@@ -275,7 +289,7 @@ def build_ecommerce_diagnosis_report(
     channel = channel.sort_values(["风险优先级", "管理贡献"], ascending=[True, True]).reset_index(drop=True)
 
     month_sales = valid_orders.groupby("月份", as_index=False).agg(成交实付=("买家实付", "sum"), 标准商品成本=("标准商品成本", "sum"), 订单数=("订单号", "nunique"))
-    month_refund = occurred_refunds.groupby("月份", as_index=False)["退款金额"].sum()
+    month_refund = occurred_refunds.groupby("退款发生月份", as_index=False)["退款金额"].sum().rename(columns={"退款发生月份": "月份"})
     month_settle = settlements.groupby("月份", as_index=False).agg(实际到账=("实际到账", "sum"), 平台费用=("平台费用", "sum"))
     month_ads = ads.groupby("月份", as_index=False).agg(广告费=("广告花费", "sum"), 归因成交额=("归因成交额", "sum"))
     month = month_sales.merge(month_refund, on="月份", how="left").merge(month_settle, on="月份", how="left").merge(month_ads, on="月份", how="left").fillna(0)
@@ -283,7 +297,19 @@ def build_ecommerce_diagnosis_report(
     month["商品毛利"] = month["退款后管理收入"] - month["标准商品成本"]
     month["ROAS"] = month["归因成交额"] / month["广告费"].where(month["广告费"].ne(0))
     month["趋势经营贡献"] = month["实际到账"] - month["标准商品成本"] - month["广告费"]
+    month["时间口径"] = "发生月视角"
+    month["口径说明"] = "销售按下单月、退款按申请/发生月、平台按结算月、广告按投放月"
     month = month.sort_values("月份").reset_index(drop=True)
+
+    attributed_refunds = occurred_refunds.dropna(subset=["订单归属月份"]).groupby("订单归属月份", as_index=False)["退款金额"].sum().rename(columns={"订单归属月份": "月份"})
+    month_attributed = month_sales.merge(attributed_refunds, on="月份", how="outer")
+    month_attributed[["成交实付", "标准商品成本", "订单数", "退款金额"]] = month_attributed[["成交实付", "标准商品成本", "订单数", "退款金额"]].fillna(0)
+    month_attributed["退款后管理收入"] = month_attributed["成交实付"] - month_attributed["退款金额"]
+    month_attributed["商品毛利"] = month_attributed["退款后管理收入"] - month_attributed["标准商品成本"]
+    for column in ("实际到账", "平台费用", "广告费", "归因成交额", "ROAS", "趋势经营贡献"):
+        month_attributed[column] = math.nan
+    month_attributed["时间口径"] = "订单归属月视角"
+    month_attributed["口径说明"] = "退款回溯原订单月；平台结算和广告缺少订单键，不强行回溯"
 
     product = valid_orders.groupby(["SKU", "商品名称"], as_index=False).agg(
         成交实付=("买家实付", "sum"), 商品原价=("商品原价", "sum"), 优惠金额=("优惠金额", "sum"), 标准商品成本=("标准商品成本", "sum"), 销量=("数量", "sum"), 订单数=("订单号", "nunique")
@@ -334,16 +360,18 @@ def build_ecommerce_diagnosis_report(
                 "入库单号": clean_key(_col(purchases_raw, "入库单号")),
                 "SKU": clean_key(_col(purchases_raw, "SKU")),
                 "入库数量": _num(_col(purchases_raw, "入库数量")),
+                "采购单位": _col(purchases_raw, "采购单位", "计量单位", "单位", required=False).astype("string").str.strip(),
                 "采购单价": _num(_col(purchases_raw, "采购单价")),
                 "采购金额": _num(_col(purchases_raw, "采购金额")),
                 "状态": _col(purchases_raw, "状态").astype("string").str.strip(),
             }
         )
-        dedupe_key = ["入库单号", "SKU", "入库数量", "采购单价", "采购金额"]
+        dedupe_key = ["入库单号", "SKU", "入库数量", "采购单位", "采购单价", "采购金额"]
         purchase_duplicate_rows = int(purchases.duplicated(dedupe_key, keep="first").sum())
         purchases = purchases.drop_duplicates(dedupe_key, keep="first")
-        pending_purchase_amount = _safe_sum(purchases.loc[~purchases["状态"].str.contains("已入库", na=False), "采购金额"])
-        received = purchases.loc[purchases["状态"].str.contains("已入库", na=False)].copy()
+        purchases["状态语义"] = classify_status_series(purchases["状态"], classify_receipt_status)
+        pending_purchase_amount = _safe_sum(purchases.loc[~purchases["状态语义"].eq(RECEIPT_CONFIRMED), "采购金额"])
+        received = purchases.loc[purchases["状态语义"].eq(RECEIPT_CONFIRMED)].copy()
         received = received.merge(products[["SKU", "商品名称", "标准单位成本"]], on="SKU", how="left", validate="many_to_one")
         received = received.sort_values("入库日期")
         purchase_output = received.groupby(["SKU", "商品名称", "标准单位成本"], as_index=False).agg(
@@ -418,10 +446,11 @@ def build_ecommerce_diagnosis_report(
         columns=["指标", "结果", "单位", "数据口径"],
     )
 
-    profit_bridge = month[["月份", "订单数", "成交实付", "退款金额", "退款后管理收入", "实际到账", "标准商品成本", "平台费用", "广告费", "ROAS", "商品毛利", "趋势经营贡献"]].copy()
+    profit_columns = ["时间口径", "月份", "订单数", "成交实付", "退款金额", "退款后管理收入", "实际到账", "标准商品成本", "平台费用", "广告费", "ROAS", "商品毛利", "趋势经营贡献", "口径说明"]
+    profit_bridge = pd.concat([month[profit_columns], month_attributed[profit_columns]], ignore_index=True, sort=False)
     settlement_output = settlements[["月份", "渠道", "订单结算基数", "平台费用", "退款冲减", "实际到账", "勾稽差额"]].copy()
-    refund_output = refunds[["申请日期", "售后单号", "原订单号", "渠道", "客户ID", "SKU", "退款类型", "退款金额", "售后状态", "原因"]].copy()
-    refund_output["是否冲减管理收入"] = refund_output["售后状态"].str.contains("已退款|退款成功", na=False).map({True: "是", False: "否，风险披露"})
+    refund_output = refunds[["申请日期", "退款发生月份", "订单归属月份", "售后单号", "原订单号", "渠道", "客户ID", "SKU", "退款类型", "退款金额", "售后状态", "状态语义", "原因"]].copy()
+    refund_output["是否冲减管理收入"] = refund_output["状态语义"].eq(REFUND_CONFIRMED).map({True: "是", False: "否，风险披露"})
 
     relation_rows: list[dict[str, Any]] = []
     for relation in (
@@ -438,12 +467,15 @@ def build_ecommerce_diagnosis_report(
     ] + relation_rows + [
         {"审计类型": "清洗", "审计项": "订单重复导出", "状态": "通过", "数据证据/口径": f"删除{order_duplicate_rows}条完全重复明细；保留同一订单多个SKU", "处理边界": "不按订单号单字段去重"},
         {"审计类型": "清洗", "审计项": "无效订单", "状态": "通过", "数据证据/口径": f"排除{len(invalid_orders)}条取消/待付款/关闭明细", "处理边界": "状态规则来自经营说明"},
+        {"审计类型": "人工边界", "审计项": "未知订单状态", "状态": "待核验" if len(unknown_orders) else "通过", "数据证据/口径": f"未知状态{len(unknown_orders)}条，不计入有效销售", "处理边界": "负向状态优先；禁止用‘包含完成’推断有效"},
+        {"审计类型": "人工边界", "审计项": "未知退款状态", "状态": "待核验" if bool((~refunds["状态语义"].isin([REFUND_CONFIRMED, REFUND_PENDING])).any()) else "通过", "数据证据/口径": f"未知状态{int((~refunds['状态语义'].isin([REFUND_CONFIRMED, REFUND_PENDING])).sum())}条", "处理边界": "未知退款不冲减收入，仅披露风险"},
         {"审计类型": "清洗", "审计项": "采购重复与待质检", "状态": "通过", "数据证据/口径": f"采购重复{purchase_duplicate_rows}条；待质检{pending_purchase_amount:,.0f}元未作为已入库", "处理边界": "待质检不能直接计可售库存"},
         {"审计类型": "勾稽", "审计项": "平台结算", "状态": "通过" if settlements["勾稽差额"].abs().max() < 0.01 else "待核验", "数据证据/口径": f"最大勾稽差额{settlements['勾稽差额'].abs().max():,.2f}元", "处理边界": "结算基数-平台费用-退款冲减=实际到账"},
         {"审计类型": "人工边界", "审计项": "利润名称", "状态": "待财务确认", "数据证据/口径": "管理贡献=实际到账-标准商品成本-广告费", "处理边界": "未包含工资、仓储、税费、总部费用，不得称净利润"},
         {"审计类型": "人工边界", "审计项": "退款成本冲回", "状态": "待业务确认", "数据证据/口径": f"已退款{refund_total:,.0f}元", "处理边界": "默认不假设退货可重新入库并冲回成本"},
         {"审计类型": "人工边界", "审计项": "广告归因", "状态": "待业务确认", "数据证据/口径": "平台7日归因", "处理边界": "归因成交额不与订单收入相加，也不强行分摊到SKU"},
         {"审计类型": "人工边界", "审计项": "库存覆盖", "状态": "待业务确认", "数据证据/口径": "期末可售库存÷最近单月销量", "处理边界": "不含季节性、促销、在途采购及预测"},
+        {"审计类型": "时间口径", "审计项": "发生月与订单归属月", "状态": "通过", "数据证据/口径": "利润驱动分析同时输出两套时间视角", "处理边界": "无订单键的平台费和广告费不回溯到订单月"},
     ]
     audit = pd.DataFrame(audit_rows)
 

@@ -18,13 +18,14 @@ def _multifact_fixture() -> tuple[list[pd.DataFrame], list[str]]:
                 ["2026-06-01", "O1", "S1", "美团", "D2", 1, 50, 10, 40, "已完成", "在线"],
                 ["2026-06-02", "O2", "S2", "堂食", "D1", 1, 50, 0, 50, "已完成", "现金"],
                 ["2026-06-02", "O2", "S2", "堂食", "D1", 1, 50, 0, 50, "已完成", "现金"],
+                ["2026-06-02", "O3", "S2", "堂食", "D1", 1, 999, 0, 999, "未完成", "现金"],
             ],
             columns=["营业日期", "订单号", "门店编码", "渠道/平台", "菜品编码", "数量", "菜品原价", "优惠分摊", "实付分摊", "订单状态", "支付方式"],
         ),
         pd.DataFrame(
             [
                 ["2026-06-03", "R1", "O1", "仅退款", 30, "已退款", "出餐慢", "门店"],
-                ["2026-06-03", "R2", "O2", "仅退款", 10, "处理中", "顾客申请", "待定"],
+                ["2026-06-03", "R2", "O2", "仅退款", 10, "退款申请完成但尚未到账", "顾客申请", "待定"],
             ],
             columns=["退款日期", "退款单号", "原订单号", "退款类型", "退款金额", "状态", "原因", "责任归属"],
         ),
@@ -134,6 +135,34 @@ def test_multifact_restaurant_audits_duplicates_labor_loss_and_review_refunds() 
     assert matched["退款匹配状态"] == "已匹配"
     assert matched["退款金额"] == 30
     assert matched["评分"] == 1
+
+
+def test_restaurant_keeps_occurrence_and_order_attribution_months_separate() -> None:
+    frames, names = _multifact_fixture()
+    frames[3].loc[0, "退款日期"] = "2026-07-03"
+    result = build_restaurant_diagnosis_report(frames, source_names=names)
+    monthly = result.outputs["利润驱动分析"]
+
+    occurrence = monthly.loc[monthly["时间口径"].eq("发生月视角")].set_index("月份")
+    attributed = monthly.loc[monthly["时间口径"].eq("订单归属月视角")].set_index("月份")
+    assert occurrence.loc["2026-06", "已退款金额"] == 0
+    assert occurrence.loc["2026-07", "已退款金额"] == 30
+    assert attributed.loc["2026-06", "已退款金额"] == 30
+    assert pd.isna(attributed.loc["2026-06", "平台成本"])
+
+
+def test_restaurant_purchase_deduplication_preserves_units() -> None:
+    frames, names = _multifact_fixture()
+    purchases = frames[7].copy()
+    purchases["采购单位"] = ["kg", "kg", "kg", "kg"]
+    purchases.loc[len(purchases)] = ["2026-06-03", "P3", "S1", "I1", 10, 5, "已入库", "箱"]
+    purchases.loc[len(purchases)] = ["2026-06-03", "P3", "S1", "I1", 10, 5, "已入库", "kg"]
+    frames[7] = purchases
+    result = build_restaurant_diagnosis_report(frames, source_names=names)
+    output = result.outputs["原料采购与损耗"]
+    p3 = output.loc[output["入库单号"].eq("P3")]
+    assert set(p3["采购单位"]) == {"箱", "kg"}
+    assert p3["纳入口径"].all()
 
 
 def test_unknown_numeric_percentage_and_balance_semantics_are_conservative() -> None:
