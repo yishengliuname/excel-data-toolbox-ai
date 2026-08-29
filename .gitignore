@@ -1,0 +1,68 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials*.json
+service-account*.json
+
+# Customer data and generated deliverables (never commit by default)
+user_data/
+outputs/
+acceptance_reports/
+releases/
+downloads/
+*.xlsx
+*.xlsm
+*.xls
+*.csv
+*.tsv
+*.parquet
+*.sqlite
+*.sqlite3
+*.db
+*.duckdb
+
+# Runtime logs, caches and temporary artifacts
+*.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest_tmp/
+.pytest-tmp*/
+.test_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.artifact_review/
+.artifact_work/
+.tmp/
+tmp_*/
+*.inspect.ndjson
+
+# Virtual environments and build outputs
+.venv/
+venv/
+env/
+node_modules/
+npm-debug.log*
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Personal sales/marketing artwork is not part of the open-source runtime
+assets/xianyu/

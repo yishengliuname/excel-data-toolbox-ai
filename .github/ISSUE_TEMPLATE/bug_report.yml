@@ -1,0 +1,72 @@
+name: Bug report
+description: 报告可复现的错误、崩溃或错误结果
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请勿上传真实客户数据、API Key、`.env`、数据库或未脱敏截图。安全漏洞请按 SECURITY.md 私密报告。
+  - type: input
+    id: version
+    attributes:
+      label: 项目版本或提交
+      placeholder: 例如 9.9.0 / commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux
+        - macOS
+        - 其他
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python 版本
+      placeholder: 例如 3.12.5
+    validations:
+      required: true
+  - type: textarea
+    id: request
+    attributes:
+      label: 脱敏后的命令与数据结构
+      description: 只提供虚构/脱敏表名、字段名、行列规模，不要提供单元格原值。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 最小复现步骤
+      placeholder: |
+        1. 启动...
+        2. 上传一份由代码生成的最小文件...
+        3. 执行...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果与完整错误文本
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 隐私确认
+      options:
+        - label: 我确认没有提交真实客户数据、个人信息或有效凭据。
+          required: true
+        - label: 我已搜索现有 Issues，并尝试在最新 main 上复现。
+          required: true

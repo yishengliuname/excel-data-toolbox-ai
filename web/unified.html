@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>表格快处 AI · 一句话完成 Excel 工作</title>
+  <link rel="stylesheet" href="/static/unified.css?v=9.1.0">
+</head>
+<body>
+  <main id="unifiedApp" class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/"><span class="brand-mark">表</span><span><b>表格快处 AI</b><small>Excel Agent Workspace</small></span></a>
+      <div class="top-status">
+        <span id="localStatus" class="status-pill online"><i></i>数据仅在本机执行</span>
+        <span id="aiConfigStatus" class="status-pill waiting" role="button" tabindex="0" title="点击测试 DeepSeek 连接"><i></i>正在检查 AI</span>
+        <button id="resetBtn" class="quiet-button" type="button">新建任务</button>
+      </div>
+    </header>
+
+    <section class="command-workspace">
+      <div class="hero-copy">
+        <span class="eyebrow">ONE COMMAND · COMPLETE EXCEL WORKFLOW</span>
+        <h1>告诉 AI 你要什么，<br><em>剩下的交给程序。</em></h1>
+        <p>清洗、合并、匹配、对账、统计分析、可视化、VBA、Power BI 与数据库方案，全部从同一个输入框开始。</p>
+      </div>
+
+      <div class="agent-panel">
+        <div id="dropZone" class="upload-strip" tabindex="0">
+          <input id="fileInput" type="file" accept=".xlsx,.xlsm,.csv,.pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.db,.sqlite,.sqlite3,.parquet" multiple hidden>
+          <div><span class="upload-icon">↑</span><b>拖入 Excel / CSV / PDF / 图片 / 数据库</b><small>每次上传自动新建独立任务 · 关联文件请一次多选</small></div>
+          <button id="chooseFileBtn" class="secondary-button" type="button">选择文件</button>
+        </div>
+        <div id="dataContext" class="data-context empty">
+          <div><b>数据上下文</b><small id="dataSummary">尚未上传文件</small></div>
+          <div id="tableChips" class="table-chips"></div>
+        </div>
+        <div class="command-box">
+          <div class="command-heading"><span>给 AI 下达任务</span><small id="commandCount">0 / 8000</small></div>
+          <textarea id="commandInput" maxlength="8000" rows="5" placeholder="例如：合并两张订单表，统一客户名称，删除重复订单，按月份和地区汇总销售额，再生成深色经营看板并标出80万元目标线。"></textarea>
+          <div class="command-footer">
+            <div class="scope-note"><span class="spark">✦</span><span id="modelLabel">AI 自动判断工具与步骤</span></div>
+            <button id="runCommandBtn" class="run-button" type="button"><span>执行 AI 命令</span><kbd>Ctrl ↵</kbd></button>
+          </div>
+        </div>
+        <div class="examples">
+          <span>试试：</span>
+          <button type="button" data-command="清洗当前订单表：去除空行、统一空白和日期格式、删除完全重复记录，并生成数据质量报告。">智能清洗</button>
+          <button type="button" data-command="合并所有结构相同的订单表，按订单号去重，再按地区和月份汇总销售额。">合并汇总</button>
+          <button type="button" data-command="分析当前销售数据，按月份生成销售额折线图，使用深色经营主题，增加80万元目标线并高亮最高月份。">分析并画图</button>
+          <button type="button" data-command="分析当前应收账款：以今天为截止日，按未到期、1-30天、31-60天、61-90天、90天以上生成账龄明细、账龄汇总和客户账龄表；保留原始数据并列出日期或金额异常。">财务账龄</button>
+          <button type="button" data-command="为当前数据全自动创建 Power BI 星型模型、Power Query、核心 DAX、三页交互报表并完成本地验收；如果已配置微软服务主体，就自动发布到 Fabric 工作区并回读验证。">Power BI</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="resultWorkspace" class="result-workspace hidden">
+      <div class="result-header"><div><span class="eyebrow">AI RESULT</span><h2 id="resultTitle">AI 正在理解任务</h2></div><span id="resultMode" class="mode-badge">规划中</span></div>
+      <div id="assistantMessage" class="assistant-message"></div>
+      <div id="planPanel" class="plan-panel hidden"></div>
+      <div id="engineeringPanel" class="engineering-panel hidden"></div>
+      <div id="approvalBar" class="approval-bar hidden"><div><b>等待人工确认</b><small>AI 只负责生成计划；确认后，确定性引擎才会在本机修改任务数据。</small></div><button id="confirmExecuteBtn" class="run-button" type="button">确认并执行计划</button></div>
+      <article id="chartStage" class="chart-stage hidden" data-theme="default">
+        <div class="chart-stage-heading"><div><span class="eyebrow">AI VISUAL</span><h3 id="chartTitle">分析图表</h3></div><div class="chart-actions"><span id="chartBadge" class="mode-badge">本机计算</span><button id="saveChartBtn" type="button" disabled hidden>固定</button><button id="downloadChartBtn" class="quiet-button" type="button">导出 PNG</button></div></div>
+        <div id="chartCanvas" class="chart-canvas"></div><p id="chartInsight" class="chart-insight"></p>
+        <div class="chart-followup"><input id="chartFollowup" class="input" placeholder="继续修改：换成横向条形图、高亮华东、改成万元格式…"><button id="chartFollowupBtn" class="secondary-button" type="button">修改图表</button></div>
+      </article>
+    </section>
+
+    <section class="task-context">
+      <div class="context-heading"><div><span class="eyebrow">LOCAL TASK</span><h2>当前任务</h2></div><div><button id="clearTaskBtn" class="danger-button" type="button">一键清空</button><button id="demoBtn" class="quiet-button" type="button" title="清空当前任务并加载一份虚构销售数据，用于体验 AI、分析和图表功能">加载演示数据</button><button id="exportBtn" class="secondary-button" type="button" disabled>导出全部结果</button></div></div>
+      <div class="context-grid">
+        <div class="table-panel"><div id="tableList" class="table-list"><div class="empty-state">上传文件后，工作表会显示在这里。</div></div></div>
+        <div class="preview-panel"><div class="preview-head"><b id="previewTitle">数据预览</b><span id="previewMeta">—</span></div><div class="preview-scroll"><table id="previewTable"><tbody><tr><td class="empty-state">暂无数据</td></tr></tbody></table></div></div>
+      </div>
+    </section>
+  </main>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/static/app.js?v=9.1.0"></script>
+</body>
+</html>

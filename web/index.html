@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>表格快处 Pro｜Excel 数据治理与智能分析工作台</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div id="toast" class="toast" aria-live="polite"></div>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">表</div>
+      <div>
+        <h1>表格快处 <em>Pro</em><span class="version-chip">V9.3</span></h1>
+        <p>Excel 数据治理与 AI 自动执行工作台</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span class="local-badge"><i></i> 本机执行 · AI 规划按选择连接云端</span>
+      <button id="undoBtn" class="button ghost" type="button" disabled>撤销上一步</button>
+      <button id="redoBtn" class="button ghost" type="button" disabled>重做</button>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <section class="side-section">
+        <div class="section-heading">
+          <span>当前任务</span>
+          <span id="taskId" class="micro-tag">—</span>
+        </div>
+        <label class="field-label" for="taskName">任务名称</label>
+        <input id="taskName" class="input" value="新建数据处理任务" maxlength="60">
+      </section>
+
+      <section class="side-section">
+        <div class="section-heading"><span>导入文件</span><span class="count" id="fileCount">0</span></div>
+        <label id="uploadZone" class="upload-zone" for="fileInput">
+          <input id="fileInput" type="file" accept=".xlsx,.csv" multiple hidden>
+          <span class="upload-icon">＋</span>
+          <strong>选择 Excel / CSV</strong>
+          <small>支持多文件，每个不超过 50 MB</small>
+        </label>
+        <button id="loadDemoBtn" class="button demo-button full" type="button">加载销售演示数据</button>
+        <div id="uploadProgress" class="upload-progress hidden"><span></span></div>
+      </section>
+
+      <section class="side-section grow">
+        <div class="section-heading"><span>数据表</span><span class="count" id="tableCount">0</span></div>
+        <div id="tableList" class="table-list empty-state-small">尚未导入数据</div>
+      </section>
+
+      <section class="privacy-note">
+        <strong>隐私提醒</strong>
+        <p>文件仅在本机临时处理；启用 AI 规划时，只发送所选表的结构与质量计数，不自动发送原始单元格值。请先获客户授权。</p>
+      </section>
+      <button id="resetBtn" class="button danger-outline full" type="button">清空本任务</button>
+    </aside>
+
+    <main class="workspace">
+      <section class="welcome" id="welcomePanel">
+        <div>
+          <span class="eyebrow">从脏数据到可汇报的业务结论</span>
+          <h2>不仅处理表格，还要看懂数据</h2>
+          <p>自动诊断质量问题，完成清洗、关联与审计，再生成趋势、贡献、异常、客户分群和可视化分析交付包。</p>
+        </div>
+        <div class="flow-strip" aria-label="处理流程">
+          <span><b>01</b> 导入</span><i>→</i>
+          <span><b>02</b> 处理</span><i>→</i>
+          <span><b>03</b> 分析</span><i>→</i>
+          <span><b>04</b> 交付</span>
+        </div>
+      </section>
+
+      <nav class="workspace-switcher" id="workspaceSwitcher" aria-label="工作区切换">
+        <button class="workspace-mode active" type="button" data-workspace-mode="ai"><span>AI</span><strong>AI 接单助手</strong><small>一句话理解、报价、规划与执行</small></button>
+        <button class="workspace-mode" type="button" data-workspace-mode="data"><span>01</span><strong>数据处理</strong><small>清洗、合并、对账与质检</small></button>
+        <button class="workspace-mode" type="button" data-workspace-mode="visual"><span>02</span><strong>可视分析</strong><small>16 类图表、洞察与看板</small></button>
+        <button class="workspace-mode" type="button" data-workspace-mode="workflow"><span>03</span><strong>工程交付</strong><small>VBA、Power BI、数据库与验收</small></button>
+      </nav>
+
+      <section class="ai-command-center" id="aiCommandCenter" aria-labelledby="aiCommandTitle">
+        <div class="ai-command-heading">
+          <div class="ai-command-title">
+            <span class="ai-spark" aria-hidden="true">AI</span>
+            <div>
+              <span class="ai-kicker">DEEPSEEK · NATURAL LANGUAGE OPERATOR · V6</span>
+              <h2 id="aiCommandTitle">AI 一句话完成</h2>
+              <p>像发微信一样说清楚你想要什么，DeepSeek 会先整理成标准话术和可审查步骤；未经你确认绝不会执行。</p>
+            </div>
+          </div>
+          <span class="ai-safety-pill"><i></i> 先规划 · 后执行</span>
+        </div>
+
+        <div class="ai-command-grid">
+          <aside class="ai-setup-card" aria-label="DeepSeek 连接与数据范围">
+            <div class="ai-section-title"><span>01</span><div><strong>连接模型</strong><small>密钥仅用于本次规划请求</small></div></div>
+            <div class="field">
+              <label for="aiApiKey">DeepSeek API Key</label>
+              <div class="password-field">
+                <input id="aiApiKey" class="input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="sk-••••••••••••">
+                <button id="aiToggleKeyBtn" class="password-toggle" type="button" aria-label="显示 API Key" aria-pressed="false">显示</button>
+              </div>
+              <small class="ai-privacy-hint"><b>不持久化</b>：只保留在当前浏览器密码框中，不写入任务、日志或配方；刷新页面即清空。</small>
+            </div>
+            <div class="field">
+              <label for="aiModel">DeepSeek 模型</label>
+              <select id="aiModel" class="select">
+                <option value="deepseek-v4-flash" selected>deepseek-v4-flash（推荐，快速）</option>
+                <option value="deepseek-v4-pro">deepseek-v4-pro（复杂任务）</option>
+              </select>
+            </div>
+            <div class="ai-connection-test">
+              <button id="aiDiagnoseBtn" class="button ghost full" type="button">检测 API 连接</button>
+              <div id="aiConnectionStatus" class="ai-connection-status neutral" aria-live="polite">尚未检测 · 仅发送固定测试词，不发送表格</div>
+            </div>
+            <div class="field">
+              <label for="aiTables">允许 AI 使用的数据表（可多选）</label>
+              <select id="aiTables" class="select multi" multiple aria-describedby="aiTablesHelp"></select>
+              <small id="aiTablesHelp" class="field-help">只发送表名、字段结构、类型和行列质量计数，不自动发送原始单元格值；执行范围不会超出所选表。</small>
+            </div>
+            <div id="aiCapabilities" class="ai-capabilities" aria-live="polite">
+              <span class="ai-capabilities-dot"></span><span>正在读取可执行能力…</span>
+            </div>
+          </aside>
+
+          <div class="ai-workbench">
+            <div class="ai-section-title"><span>02</span><div><strong>像聊天一样描述需求</strong><small>不懂专业术语也没关系；尽量说清用哪些表、怎么判断、最后想拿到什么</small></div></div>
+            <div class="field ai-prompt-field">
+              <label for="aiPrompt">你的处理需求</label>
+              <textarea id="aiPrompt" class="input ai-prompt" rows="6" maxlength="8000" placeholder="可以直接说：老板让我把订单、流水和退款三个表核一下。订单号一样就先对上，钱差一分钱没关系，晚三天到账也算正常；重复的、拆成两笔的别乱合，单独给我一张表人工看。最后把对上的、差钱的、少单的和退款没到账的分别整理好。"></textarea>
+              <div class="ai-prompt-footer"><span id="aiPromptCount">0 / 8000</span><span>不要在需求中填写 API Key、身份证号等敏感信息</span></div>
+            </div>
+            <div class="ai-examples" aria-label="需求示例">
+              <span>不会写？点一个口语示例：</span>
+              <button type="button" data-ai-example="老板让我把订单、银行流水和退款三个表核一下。订单号一样的先对上，金额差一分钱没关系，晚三天到账也算正常。重复订单、同一笔拆成两笔的不要直接算成功，单独放出来让我确认。最后给我对上的、金额不一样的、订单有但流水没有的、流水有但订单没有的、退款没到账的几张表，再做一张汇总。">老板让我对账</button>
+              <button type="button" data-ai-example="客户这个销售表有点乱，你帮我把空格、日期和客户名字整理一下。订单号一样的只留更新时间最新那条，金额小于零或者订单号没填的单独挑出来。然后按月份、地区和渠道算销售额跟退款率，异常的大单也标出来，最后给我一个能直接交客户的 Excel。">客户说表很乱</button>
+              <button type="button" data-ai-example="清理当前销售订单表：统一客户名称和日期格式，删除订单号完全重复但保留最后更新时间最新的一条；检查订单号非空且唯一、实付金额不能为负；按月份、区域和渠道汇总销售额与退款率，识别 IQR 异常订单，输出清洗结果、质量失败明细、管理层汇总和专业 Excel 交付包。">销售治理</button>
+              <button type="button" data-ai-example="将平台订单表、银行流水表和退款明细表做三方对账：先按订单号匹配，金额容差 0.01 元，日期容差 3 天；重复订单必须隔离，可能的 1 对 2 拆单只进入人工核验；分别输出完全匹配、金额差异、日期差异、订单缺失、流水孤账、退款未入账、重复键与待核验清单，并生成处理摘要。">三方对账</button>
+              <button type="button" data-ai-example="对近 24 个月交易数据做经营分析：清洗客户、产品、地区和日期字段，构建月度趋势、地区×产品透视、客户 RFM 分层、收入贡献和异常交易明细；对空值率超过 5% 的关键字段给出风险提示，最终导出可直接汇报的结果表。">经营分析</button>
+            </div>
+            <div class="ai-plan-actions">
+              <button id="aiClearBtn" class="button ghost" type="button">清空需求</button>
+              <button id="aiPlanBtn" class="button ai-plan-button" type="button"><span>1</span> 仅生成计划</button>
+            </div>
+
+            <section id="aiPlanPanel" class="ai-plan-panel empty" aria-live="polite">
+              <div class="ai-plan-head">
+                <div><span class="card-kicker">EXECUTION PLAN</span><h3>等待生成计划</h3></div>
+                <span id="aiPlanStatus" class="ai-status neutral">尚未规划</span>
+              </div>
+              <p id="aiPlanSummary">AI 会先判断需求是否在程序能力范围内，再列出具体步骤、参数和风险。</p>
+              <div id="aiNormalizedRequest" class="ai-normalized-request hidden">
+                <div><span>DEEPSEEK 提取的标准话术</span><small>请确认这段话准确表达了你的真实需求</small></div>
+                <p id="aiNormalizedRequestText"></p>
+              </div>
+              <div id="aiClarification" class="ai-clarification hidden"></div>
+              <div class="ai-plan-content">
+                <div>
+                  <h4>结构化步骤</h4>
+                  <ol id="aiPlanSteps" class="ai-step-list"><li class="empty">生成计划后在这里逐步核对。</li></ol>
+                </div>
+                <div>
+                  <h4>风险与确认项</h4>
+                  <ul id="aiPlanRisks" class="ai-risk-list"><li class="empty">暂无风险信息。</li></ul>
+                </div>
+              </div>
+              <div class="ai-confirm-bar">
+                <label class="ai-confirm-check"><input id="aiConfirmCheck" type="checkbox" disabled> 我已核对数据范围、步骤和参数，确认执行这份计划</label>
+                <button id="aiExecuteBtn" class="button primary" type="button" disabled><span>2</span> 确认并执行</button>
+              </div>
+            </section>
+
+            <section id="aiExecutionResult" class="ai-execution-result hidden" aria-live="polite">
+              <div class="ai-plan-head"><div><span class="card-kicker">EXECUTION RESULT</span><h3>执行结果</h3></div><span id="aiExecutionStatus" class="ai-status neutral">等待执行</span></div>
+              <p id="aiExecutionSummary"></p>
+              <div id="aiExecutionMetrics" class="ai-execution-metrics"></div>
+              <ul id="aiExecutionDetails" class="ai-result-list"></ul>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section class="v3-hub" id="v3Hub" aria-labelledby="v3HubTitle">
+        <div class="v3-hub-heading">
+          <div>
+            <span class="premium-kicker">ORDER DELIVERY WORKFLOW · V3</span>
+            <h2 id="v3HubTitle">订单复跑、验收、对账与人工核验</h2>
+            <p>把一次处理沉淀成可复用方案；正式交付前完成规则验收和不确定项确认。</p>
+          </div>
+          <span class="v3-state-pill"><i></i> 本地订单工作流</span>
+        </div>
+
+        <section class="engineering-intake" aria-labelledby="engineeringTitle">
+          <div class="engineering-heading"><div><span class="premium-kicker">AI ENGINEERING ORDER</span><h3 id="engineeringTitle">高级工程订单方案生成器</h3><p>生成可审查的 VBA、Power BI、数据库或业务决策交付包；代码与查询不会自动运行。</p></div><span class="safe-pill">方案生成 · 人工验收</span></div>
+          <div class="engineering-types">
+            <button class="engineering-type active" type="button" data-engineering-type="vba"><b>VBA</b><span>宏模块 · 注释 · 测试</span></button>
+            <button class="engineering-type" type="button" data-engineering-type="power_bi"><b>Power BI</b><span>模型 · DAX · Power Query</span></button>
+            <button class="engineering-type" type="button" data-engineering-type="database"><b>数据库</b><span>只读 SQL · 字段映射</span></button>
+            <button class="engineering-type" type="button" data-engineering-type="business_decision"><b>业务判断</b><span>决策矩阵 · 人工审批</span></button>
+          </div>
+          <input id="engineeringCategory" type="hidden" value="vba">
+          <div class="engineering-form">
+            <div class="field"><label>DeepSeek API Key（仅本次请求）</label><input id="engineeringApiKey" class="input" type="password" autocomplete="off" placeholder="sk-••••••••••••"></div>
+            <div class="field"><label>模型</label><select id="engineeringModel" class="select"><option value="deepseek-v4-pro">deepseek-v4-pro（推荐）</option><option value="deepseek-v4-flash">deepseek-v4-flash</option></select></div>
+            <div class="field span-2"><label>客户需求、运行环境、输入规则与期望交付物</label><textarea id="engineeringPrompt" class="input" rows="4" maxlength="8000" placeholder="例如：Windows 11 + Office 365。客户每月收到 20 个同结构工作簿，需要 VBA 批量合并指定工作表、校验表头、记录跳过文件和错误日志，生成汇总表；不能覆盖源文件，要求提供模块代码、安装说明、测试案例和回滚方法。"></textarea></div>
+          </div>
+          <div class="v3-actions"><span class="engineering-boundary">只生成方案和代码文本；运行宏、连接数据库、刷新/发布 Power BI 前必须人工确认。</span><button id="generateEngineeringBtn" class="button primary" type="button">生成高级工程交付包</button></div>
+          <div id="engineeringResult" class="engineering-result empty">选择订单类别并描述需求后，这里会显示标准话术、交付物、实施步骤、代码/公式、测试与风险。</div>
+        </section>
+
+        <nav class="v3-stage-nav" aria-label="V3 订单阶段导航">
+          <button class="v3-stage active" type="button" data-v3-stage="recipes"><b>01</b><span><strong>方案与复跑</strong><small>保存配方 · 新周期复用</small></span></button>
+          <button class="v3-stage" type="button" data-v3-stage="quality"><b>02</b><span><strong>质量验收</strong><small>业务规则 · 通过率</small></span></button>
+          <button class="v3-stage" type="button" data-v3-stage="reconcile"><b>03</b><span><strong>高级对账</strong><small>多键 · 金额与日期容差</small></span></button>
+          <button class="v3-stage" type="button" data-v3-stage="reviews"><b>04</b><span><strong>核验中心</strong><small>人工接受 · 拒绝</small></span><em id="reviewPendingBadge">0</em></button>
+        </nav>
+
+        <div class="v3-stage-panels">
+          <section class="v3-panel active" id="v3-panel-recipes" data-v3-panel="recipes">
+            <div class="v3-grid two">
+              <article class="tool-card v3-card">
+                <div class="card-heading">
+                  <div><span class="card-kicker">REUSABLE RECIPE</span><h4>编辑并保存处理配方</h4></div>
+                  <button id="refreshRecipesBtn" class="button ghost compact" type="button">刷新列表</button>
+                </div>
+                <div class="two-cols">
+                  <div class="field"><label>配方名称</label><input id="recipeName" class="input" maxlength="80" placeholder="例如：月度销售清洗"></div>
+                  <div class="field"><label>步骤预设</label><select id="recipePreset" class="select"><option value="standard_clean">标准清洗准备</option><option value="monthly_summary">月度汇总复跑</option><option value="reconcile_delivery">对账交付准备</option></select></div>
+                </div>
+                <div class="field"><label>配方说明</label><input id="recipeDescription" class="input" maxlength="240" placeholder="适用文件、字段约定和交付目标"></div>
+                <div class="field">
+                  <div class="field-heading"><label for="recipeSteps">JSON 步骤</label><button id="loadRecipePresetBtn" class="text-button" type="button">载入所选预设</button></div>
+                  <textarea id="recipeSteps" class="input json-editor" rows="10" spellcheck="false" aria-describedby="recipeStepsHelp"></textarea>
+                  <small id="recipeStepsHelp" class="field-help">必须是 JSON 数组；前端校验格式后将步骤原样提交。</small>
+                </div>
+                <div class="v3-actions"><button id="loadRecipeToEditorBtn" class="button ghost" type="button">载入已选配方</button><button id="saveRecipeBtn" class="button secondary" type="button">保存配方</button></div>
+              </article>
+
+              <article class="tool-card featured v3-card">
+                <div class="card-heading"><div><span class="card-kicker">SAFE RERUN</span><h4>选择配方并运行</h4></div><span id="recipeCountBadge" class="micro-tag">0 个配方</span></div>
+                <div class="field"><label>已保存配方</label><select id="recipeSelect" class="select"><option value="">正在读取配方…</option></select></div>
+                <div id="recipeDetail" class="v3-inline-note">选择配方后显示步骤数量和说明。</div>
+                <div class="two-cols">
+                  <div class="field"><label>输入数据表</label><select id="recipeTable" class="select"></select></div>
+                  <div class="field"><label>输出名称</label><input id="recipeOutputName" class="input" value="配方运行结果"></div>
+                </div>
+                <div class="v3-actions"><button id="dryRunRecipeBtn" class="button ghost" type="button">试运行（不落表）</button><button id="runRecipeBtn" class="button primary" type="button">正式运行</button></div>
+                <div id="recipeResult" class="v3-result empty">尚未运行配方。</div>
+              </article>
+            </div>
+          </section>
+
+          <section class="v3-panel" id="v3-panel-quality" data-v3-panel="quality">
+            <article class="tool-card v3-card">
+              <div class="card-heading">
+                <div><span class="card-kicker">ACCEPTANCE GATE</span><h4>构建质量验收规则</h4><p>支持非空、唯一、范围、正则和允许值；验收结果不静默删除失败记录。</p></div>
+                <button id="addQualityRuleBtn" class="button ghost compact" type="button">＋ 添加规则</button>
+              </div>
+              <div class="v3-toolbar three">
+                <div class="field"><label>待验收数据表</label><select id="validationTable" class="select"></select></div>
+                <div class="field"><label>验收结果名称</label><input id="validationOutputName" class="input" value="质量验收明细"></div>
+                <div class="field action-field"><button id="runValidationBtn" class="button primary full" type="button">运行质量验收</button></div>
+              </div>
+              <div id="qualityRules" class="quality-rule-list" aria-live="polite"></div>
+              <div id="qualityResult" class="v3-result empty">添加规则并运行后，将显示通过率、失败数及逐规则结果。</div>
+            </article>
+          </section>
+
+          <section class="v3-panel" id="v3-panel-reconcile" data-v3-panel="reconcile">
+            <article class="tool-card v3-card">
+              <div class="card-heading"><div><span class="card-kicker">ADVANCED RECONCILIATION</span><h4>多键与容差对账</h4><p>键字段按选择顺序一一对应；左右金额字段必选，日期字段可选。</p></div><span class="safe-pill">原表不覆盖</span></div>
+              <div class="v3-grid two reconcile-grid">
+                <div class="reconcile-side">
+                  <span class="side-label">左表 / 账面表</span>
+                  <div class="field"><label>数据表</label><select id="reconcileLeft" class="select"></select></div>
+                  <div class="field"><label>匹配键（可多选，按顺序）</label><select id="reconcileLeftKeys" class="select multi" multiple></select></div>
+                  <div class="two-cols"><div class="field"><label>金额字段（必选）</label><select id="reconcileLeftAmount" class="select"></select></div><div class="field"><label>日期字段（可选）</label><select id="reconcileLeftDate" class="select"></select></div></div>
+                </div>
+                <div class="reconcile-side right">
+                  <span class="side-label">右表 / 流水表</span>
+                  <div class="field"><label>数据表</label><select id="reconcileRight" class="select"></select></div>
+                  <div class="field"><label>匹配键（可多选，按顺序）</label><select id="reconcileRightKeys" class="select multi" multiple></select></div>
+                  <div class="two-cols"><div class="field"><label>金额字段（必选）</label><select id="reconcileRightAmount" class="select"></select></div><div class="field"><label>日期字段（可选）</label><select id="reconcileRightDate" class="select"></select></div></div>
+                </div>
+              </div>
+              <div class="v3-toolbar four">
+                <div class="field"><label>金额容差</label><input id="reconcileAmountTolerance" class="input" type="number" min="0" step="0.01" value="0.01"></div>
+                <div class="field"><label>日期容差（天）</label><input id="reconcileDateTolerance" class="input" type="number" min="0" step="1" value="0"></div>
+                <div class="field"><label>输出名称</label><input id="reconcileOutputName" class="input" value="高级对账结果"></div>
+                <div class="field action-field"><button id="runAdvancedReconcileBtn" class="button primary full" type="button">开始高级对账</button></div>
+              </div>
+              <div id="reconcileResult" class="v3-result empty">完成后显示匹配、左侧独有、右侧独有及容差差异数量。</div>
+            </article>
+          </section>
+
+          <section class="v3-panel" id="v3-panel-reviews" data-v3-panel="reviews">
+            <article class="tool-card v3-card review-card">
+              <div class="card-heading">
+                <div><span class="card-kicker">HUMAN-IN-THE-LOOP</span><h4>统一核验中心</h4><p>集中处理模糊匹配、规则异常和对账差异；只对勾选记录提交决定。</p></div>
+                <button id="refreshReviewsBtn" class="button ghost compact" type="button">刷新清单</button>
+              </div>
+              <div class="review-toolbar">
+                <label class="check-line"><input id="reviewSelectAll" type="checkbox"> 选择当前筛选结果</label>
+                <div class="field"><label>类型</label><select id="reviewTypeFilter" class="select"><option value="">全部类型</option></select></div>
+                <div class="field"><label>状态</label><select id="reviewStatusFilter" class="select"><option value="">全部状态</option></select></div>
+                <span id="reviewSummary" class="micro-tag">等待加载</span>
+              </div>
+              <div class="review-table-wrap">
+                <table class="review-table">
+                  <thead><tr><th class="review-check"></th><th>类型 / 来源</th><th>原值</th><th>候选 / 差异</th><th>分数</th><th>状态</th><th>说明</th></tr></thead>
+                  <tbody id="reviewList"><tr><td colspan="7" class="blank-table">正在读取待核验记录…</td></tr></tbody>
+                </table>
+              </div>
+              <div class="review-decision-bar">
+                <div class="field"><label>处理备注（可选）</label><input id="reviewDecisionNote" class="input" maxlength="240" placeholder="例如：已与客户确认，按标准名称合并"></div>
+                <button id="rejectReviewsBtn" class="button danger-outline" type="button">批量拒绝</button>
+                <button id="acceptReviewsBtn" class="button primary" type="button">批量接受</button>
+              </div>
+              <div id="reviewFeedback" class="v3-inline-note">决定会记录到任务历史；未选择的记录保持原状态。</div>
+            </article>
+          </section>
+        </div>
+      </section>
+
+      <section class="metric-grid" id="metricGrid">
+        <article class="metric-card"><span>数据行数</span><strong id="metricRows">—</strong><small>当前数据表</small></article>
+        <article class="metric-card"><span>字段列数</span><strong id="metricColumns">—</strong><small>当前数据表</small></article>
+        <article class="metric-card warn"><span>空值单元格</span><strong id="metricMissing">—</strong><small>建议检查</small></article>
+        <article class="metric-card accent"><span>重复整行</span><strong id="metricDuplicates">—</strong><small>建议检查</small></article>
+      </section>
+
+      <nav class="tabs" aria-label="功能导航">
+        <button class="tab active" data-tab="preview">数据概览</button>
+        <button class="tab" data-tab="clean">清洗治理</button>
+        <button class="tab" data-tab="merge">合并匹配</button>
+        <button class="tab" data-tab="compare">比对审计</button>
+        <button class="tab premium-tab" data-tab="analysis">智能分析</button>
+        <button class="tab" data-tab="summary">汇总拆分</button>
+        <button class="tab" data-tab="export">交付中心</button>
+      </nav>
+
+      <section class="tab-panel active" id="panel-preview">
+        <div class="panel-header">
+          <div><h3>数据预览</h3><p>仅展示前 100 行；导出时处理完整数据。</p></div>
+          <div class="inline-control"><label for="activeTable">当前数据表</label><select id="activeTable" class="select"></select></div>
+        </div>
+        <div class="quality-banner hidden" id="qualityBanner"></div>
+        <div class="data-table-wrap">
+          <table class="data-table" id="previewTable"><tbody><tr><td class="blank-table">导入文件后在这里预览数据</td></tr></tbody></table>
+        </div>
+        <div class="column-profile" id="columnProfile"></div>
+      </section>
+
+      <section class="tab-panel" id="panel-clean">
+        <div class="panel-header"><div><h3>一键清洗</h3><p>勾选需要的规则，处理后会生成新数据表。</p></div><span class="safe-pill">原表不覆盖</span></div>
+        <div class="form-grid three">
+          <label class="option-card checked"><input id="cleanTrim" type="checkbox" checked><span><strong>清理文本</strong><small>去首尾空格、换行与不可见字符</small></span></label>
+          <label class="option-card checked"><input id="cleanEmpty" type="checkbox" checked><span><strong>删除空行空列</strong><small>移除完全为空的数据区域</small></span></label>
+          <label class="option-card"><input id="cleanDuplicates" type="checkbox"><span><strong>删除重复</strong><small>按全部列或指定关键字段</small></span></label>
+          <label class="option-card"><input id="cleanMissing" type="checkbox"><span><strong>填充空值</strong><small>固定值、向前或向后填充</small></span></label>
+          <label class="option-card"><input id="cleanTypes" type="checkbox"><span><strong>智能类型</strong><small>识别数字与日期，失败值保留</small></span></label>
+          <label class="option-card"><input id="cleanNormalize" type="checkbox"><span><strong>统一列名</strong><small>清除列名空格与重复列名</small></span></label>
+        </div>
+        <div class="settings-grid">
+          <div class="field"><label>去重关键字段（不选则按全部列）</label><select id="dedupeColumns" class="select multi" multiple></select></div>
+          <div class="field"><label>重复项保留方式</label><select id="dedupeKeep" class="select"><option value="first">保留第一条</option><option value="last">保留最后一条</option><option value="none">全部移除</option></select></div>
+          <div class="field"><label>空值填充方式</label><select id="fillMethod" class="select"><option value="value">固定值</option><option value="ffill">向下沿用上一条</option><option value="bfill">向上沿用下一条</option></select></div>
+          <div class="field"><label>固定填充值</label><input id="fillValue" class="input" placeholder="例如：未填写"></div>
+          <div class="field span-2"><label>结果名称</label><input id="cleanOutputName" class="input" value="清洗结果"></div>
+        </div>
+        <div class="action-row"><button id="runCleanBtn" class="button primary" type="button">执行清洗并预览</button></div>
+        <div class="sub-divider"><span>更多常用整理</span></div>
+        <div class="split-panels compact">
+          <article class="tool-card">
+            <span class="tool-number">A</span><h3>字段整理与排序</h3><p>选择/调整字段，改列名并按指定字段排序。</p>
+            <div class="field"><label>保留字段（不选则全部保留）</label><select id="columnKeep" class="select multi" multiple></select></div>
+            <div class="two-cols"><div class="field"><label>需要重命名的字段</label><select id="renameColumn" class="select"></select></div><div class="field"><label>新字段名</label><input id="renameValue" class="input" placeholder="例如：订单编号"></div></div>
+            <div class="two-cols"><div class="field"><label>排序字段</label><select id="sortColumn" class="select"></select></div><div class="field"><label>排序方式</label><select id="sortAscending" class="select"><option value="true">升序</option><option value="false">降序</option></select></div></div>
+            <div class="field"><label>结果名称</label><input id="columnsOutputName" class="input" value="字段整理结果"></div>
+            <button id="runColumnsBtn" class="button secondary full" type="button">生成字段整理结果</button>
+          </article>
+          <article class="tool-card">
+            <span class="tool-number">B</span><h3>按列查找替换</h3><p>适合统一状态、地区、产品名称等字段值。</p>
+            <div class="field"><label>目标字段</label><select id="replaceColumn" class="select"></select></div>
+            <div class="two-cols"><div class="field"><label>查找内容</label><input id="replaceFind" class="input" placeholder="原内容"></div><div class="field"><label>替换为</label><input id="replaceWith" class="input" placeholder="新内容"></div></div>
+            <div class="two-cols"><div class="field"><label>匹配方式</label><select id="replaceMode" class="select"><option value="exact">完全一致</option><option value="contains">包含内容</option></select></div><label class="check-line"><input id="replaceCase" type="checkbox"> 区分大小写</label></div>
+            <div class="field"><label>结果名称</label><input id="replaceOutputName" class="input" value="查找替换结果"></div>
+            <button id="runReplaceBtn" class="button secondary full" type="button">执行查找替换</button>
+          </article>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="panel-merge">
+        <div class="split-panels">
+          <article class="tool-card">
+            <span class="tool-number">01</span><h3>纵向追加</h3><p>把结构相近的多个表按行合并。</p>
+            <div class="field"><label>选择数据表（可多选）</label><select id="concatTables" class="select multi tall" multiple></select></div>
+            <div class="two-cols"><div class="field"><label>字段策略</label><select id="concatStrategy" class="select"><option value="outer">保留全部字段</option><option value="inner">只保留共同字段</option></select></div><label class="check-line"><input id="concatSource" type="checkbox" checked> 添加来源列</label></div>
+            <div class="field"><label>结果名称</label><input id="concatOutputName" class="input" value="追加合并结果"></div>
+            <button id="runConcatBtn" class="button primary full" type="button">开始追加</button>
+          </article>
+          <article class="tool-card">
+            <span class="tool-number">02</span><h3>关键字段匹配</h3><p>按订单号、手机号、编码等字段横向连接。</p>
+            <div class="two-cols"><div class="field"><label>左表</label><select id="joinLeft" class="select"></select></div><div class="field"><label>右表</label><select id="joinRight" class="select"></select></div></div>
+            <div class="two-cols"><div class="field"><label>左表键</label><select id="joinLeftKey" class="select"></select></div><div class="field"><label>右表键</label><select id="joinRightKey" class="select"></select></div></div>
+            <div class="two-cols"><div class="field"><label>连接方式</label><select id="joinHow" class="select"><option value="left">左连接</option><option value="inner">内连接</option><option value="outer">全连接</option></select></div><div class="field"><label>结果名称</label><input id="joinOutputName" class="input" value="字段匹配结果"></div></div>
+            <button id="runJoinBtn" class="button primary full" type="button">检查并匹配</button>
+          </article>
+        </div>
+        <div class="sub-divider"><span>相似名称治理与模糊匹配</span></div>
+        <div class="split-panels compact">
+          <article class="tool-card pro-tool">
+            <span class="tool-number">03</span><h3>相似值候选分组</h3><p>找出公司、客户、商品名称的空格、大小写、简称和轻微错字差异，生成待确认候选表。</p>
+            <div class="two-cols"><div class="field"><label>目标字段</label><select id="fuzzyClusterColumn" class="select"></select></div><div class="field"><label>相似度阈值</label><select id="fuzzyClusterThreshold" class="select"><option value="0.92">严格 92%</option><option value="0.88" selected>标准 88%</option><option value="0.82">宽松 82%</option></select></div></div>
+            <div class="field"><label>结果名称</label><input id="fuzzyClusterOutput" class="input" value="相似值待确认"></div>
+            <button id="runFuzzyClusterBtn" class="button secondary full" type="button">扫描并生成候选组</button>
+          </article>
+          <article class="tool-card pro-tool featured">
+            <span class="tool-number">04</span><h3>两表模糊匹配</h3><p>精确键不存在时按名称寻找最佳候选；低分或前两名过近的记录会标记“待确认”，不会静默合并。</p>
+            <div class="two-cols"><div class="field"><label>来源表</label><select id="fuzzySource" class="select"></select></div><div class="field"><label>标准表</label><select id="fuzzyLookup" class="select"></select></div></div>
+            <div class="two-cols"><div class="field"><label>来源名称字段</label><select id="fuzzySourceKey" class="select"></select></div><div class="field"><label>标准名称字段</label><select id="fuzzyLookupKey" class="select"></select></div></div>
+            <div class="two-cols"><div class="field"><label>最低相似度</label><select id="fuzzyLookupThreshold" class="select"><option value="0.92">92%</option><option value="0.88" selected>88%</option><option value="0.82">82%</option></select></div><div class="field"><label>结果名称</label><input id="fuzzyLookupOutput" class="input" value="模糊匹配结果"></div></div>
+            <button id="runFuzzyLookupBtn" class="button primary full" type="button">生成匹配与待确认清单</button>
+          </article>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="panel-compare">
+        <div class="panel-header"><div><h3>新旧数据比对</h3><p>按唯一键输出新增、删除、修改、未变化与重复键。</p></div></div>
+        <div class="settings-grid">
+          <div class="field"><label>旧表 / 基准表</label><select id="compareBase" class="select"></select></div>
+          <div class="field"><label>新表 / 目标表</label><select id="compareTarget" class="select"></select></div>
+          <div class="field"><label>唯一标识字段</label><select id="compareKey" class="select"></select></div>
+          <div class="field"><label>比较字段（不选则比较共同字段）</label><select id="compareColumns" class="select multi" multiple></select></div>
+          <div class="field span-2"><label>结果名称前缀</label><input id="compareOutputName" class="input" value="数据比对"></div>
+        </div>
+        <div class="callout">比对前会检查唯一键；若存在重复键，将同时生成“重复键”结果供核对。</div>
+        <div class="action-row"><button id="runCompareBtn" class="button primary" type="button">开始比对</button></div>
+      </section>
+
+      <section class="tab-panel" id="panel-analysis">
+        <div class="panel-header analysis-header">
+          <div>
+            <span class="premium-kicker">PRO ANALYTICS</span>
+            <h3>智能分析与可视化</h3>
+            <p>先自动体检，再按业务维度生成图表、异常明细、透视结果和客户分群。</p>
+          </div>
+          <div class="header-actions">
+            <button id="runAnalysisBtn" class="button primary" type="button">一键生成智能分析</button>
+            <button id="exportAnalysisBtn" class="button ghost" type="button">导出分析交付包</button>
+          </div>
+        </div>
+
+        <div id="analysisEmpty" class="analysis-empty">
+          <span class="analysis-empty-icon">⌁</span>
+          <strong>导入数据后，一键发现值得汇报的结论</strong>
+          <p>包含质量评分、字段画像、异常预警、强相关关系与自动洞察；所有计算都在本机完成。</p>
+        </div>
+
+        <div id="analysisResult" class="hidden">
+          <div class="analysis-overview">
+            <article class="quality-score-card">
+              <div id="qualityRing" class="quality-ring" style="--score: 0">
+                <div><strong id="qualityScore">—</strong><span>质量分</span></div>
+              </div>
+              <div><span class="score-label" id="qualityGrade">等待分析</span><p id="qualitySummary">—</p></div>
+            </article>
+            <div id="analysisKpis" class="analysis-kpis"></div>
+          </div>
+
+          <div class="analysis-grid">
+            <article class="analysis-card">
+              <div class="card-heading"><div><span class="card-kicker">AUTO INSIGHTS</span><h4>自动洞察</h4></div><span id="insightCount" class="micro-tag">0 条</span></div>
+              <div id="insightList" class="insight-list"></div>
+            </article>
+            <article class="analysis-card">
+              <div class="card-heading"><div><span class="card-kicker">DATA ALERTS</span><h4>数据问题与建议</h4></div><span id="issueCount" class="micro-tag">0 项</span></div>
+              <div id="issueList" class="issue-list"></div>
+            </article>
+          </div>
+
+          <article class="analysis-card correlation-card">
+            <div class="card-heading"><div><span class="card-kicker">RELATIONSHIPS</span><h4>数值字段相关性</h4></div><small>用于发现指标同向或反向变化，不代表因果关系</small></div>
+            <div id="correlationMatrix" class="correlation-matrix"></div>
+          </article>
+        </div>
+
+        <div class="sub-divider"><span>自助可视化看板</span></div>
+        <section class="ai-visual-studio" aria-labelledby="aiVisualTitle">
+          <div class="ai-visual-copy">
+            <span class="card-kicker">AI VISUAL COPILOT · SAFE CHARTSPEC</span>
+            <h3 id="aiVisualTitle">用一句话创建，也能继续对话修改</h3>
+            <p>例如：“按月画销售额折线图，深色经营主题，加 80 万目标线，高亮 6 月，金额用万元显示。”AI 只生成受约束的图表规格，不能执行代码。</p>
+            <div class="ai-visual-examples">
+              <button type="button" data-ai-chart-example="按月份汇总订单金额画折线图，使用深色经营主题，标题叫月度销售趋势，显示数据标签。">月度趋势</button>
+              <button type="button" data-ai-chart-example="按地区汇总订单金额做降序横向条形图，高亮华东为橙色，金额用万元显示。">地区排行</button>
+              <button type="button" data-ai-chart-example="把当前图改成极简风格，增加 800000 的目标线并命名为月度目标，隐藏图例。">继续修改</button>
+            </div>
+          </div>
+          <div class="ai-visual-console">
+            <textarea id="aiChartPrompt" class="textarea" maxlength="8000" rows="3" placeholder="描述你想看的业务问题、字段、图表、颜色、目标线、高亮或修改要求…"></textarea>
+            <div class="ai-visual-auth">
+              <input id="aiChartApiKey" class="input" type="password" autocomplete="off" placeholder="DeepSeek API Key（仅本次请求）">
+              <select id="aiChartModel" class="select"><option value="deepseek-v4-flash">deepseek-v4-flash</option><option value="deepseek-v4-pro">deepseek-v4-pro</option></select>
+              <button id="aiChartRunBtn" class="button primary" type="button">AI 生成 / 修改</button>
+              <button id="aiChartClearBtn" class="button ghost" type="button">新图</button>
+            </div>
+            <div id="aiChartResult" class="ai-chart-result neutral"><strong>等待需求</strong><span>不会上传单元格原值；生成后仍可用左侧表单手工微调。</span></div>
+          </div>
+        </section>
+        <section class="chart-catalog" aria-labelledby="chartCatalogTitle">
+          <div class="chart-catalog-heading"><div><span class="card-kicker">VISUAL LIBRARY</span><h3 id="chartCatalogTitle">选择你想表达的问题</h3></div><p>点击图标会自动切换图表类型；不确定时先看每张卡片的用途。</p></div>
+          <div class="chart-type-grid">
+            <button class="chart-type-card active" type="button" data-chart-type="bar"><b>▥</b><span><strong>柱状图</strong><small>比较类别大小</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="horizontal_bar"><b>▰</b><span><strong>横向条形</strong><small>长名称排行榜</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="grouped_bar"><b>▥▥</b><span><strong>分组柱状</strong><small>多系列并排比较</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="stacked_bar"><b>▤</b><span><strong>堆叠柱状</strong><small>总量与构成</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="line"><b>⌁</b><span><strong>折线图</strong><small>时间趋势变化</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="area"><b>◿</b><span><strong>面积图</strong><small>趋势与规模感</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="pie"><b>◕</b><span><strong>环形图</strong><small>少量类别占比</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="radar"><b>⬡</b><span><strong>雷达图</strong><small>多指标/系列画像</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="scatter"><b>⠿</b><span><strong>散点回归</strong><small>两项指标关系</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="histogram"><b>▥</b><span><strong>直方图</strong><small>数值分布形态</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="box"><b>⊣□⊢</b><span><strong>箱线图</strong><small>分布与异常值</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="heatmap"><b>▦</b><span><strong>热力图</strong><small>二维交叉强弱</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="waterfall"><b>▟▜</b><span><strong>瀑布图</strong><small>增减贡献过程</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="funnel"><b>▽</b><span><strong>漏斗图</strong><small>流程转化损耗</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="treemap"><b>▦</b><span><strong>矩形树图</strong><small>层级面积占比</small></span></button>
+            <button class="chart-type-card" type="button" data-chart-type="gantt"><b>▰━</b><span><strong>甘特图</strong><small>项目排期进度</small></span></button>
+          </div>
+        </section>
+        <div class="visual-workbench">
+          <aside class="chart-controls">
+            <div class="two-cols">
+              <div class="field"><label>图表类型</label><select id="chartType" class="select"><option value="bar">柱状图</option><option value="horizontal_bar">横向条形图</option><option value="grouped_bar">多系列分组柱</option><option value="stacked_bar">多系列堆叠柱</option><option value="line">趋势折线图</option><option value="area">面积趋势图</option><option value="pie">占比环形图</option><option value="radar">多系列雷达图</option><option value="funnel">转化漏斗图</option><option value="waterfall">增减瀑布图</option><option value="treemap">矩形树图</option><option value="histogram">数值直方图</option><option value="scatter">散点 + 线性回归</option><option value="box">箱线分布图</option><option value="heatmap">二维热力图</option><option value="gantt">项目甘特图</option></select></div>
+              <div class="field"><label>展示数量</label><select id="chartTopN" class="select"><option value="10">前 10 项</option><option value="15">前 15 项</option><option value="20">前 20 项</option><option value="30">前 30 项</option><option value="50">前 50 项</option></select></div>
+            </div>
+            <div class="field"><label>维度 / 横轴字段</label><select id="chartDimension" class="select"></select></div>
+            <div class="field"><label>指标 / 纵轴字段</label><select id="chartMeasure" class="select"></select></div>
+            <div id="chartSeriesField" class="field"><label>系列字段（分组 / 堆叠 / 雷达 / 热力）</label><select id="chartSeries" class="select"></select></div>
+            <div id="chartGanttFields" class="chart-gantt-fields hidden">
+              <div class="two-cols"><div class="field"><label>开始日期</label><select id="chartStart" class="select"></select></div><div class="field"><label>结束日期</label><select id="chartEnd" class="select"></select></div></div>
+              <div class="field"><label>进度字段（0–100，可选）</label><select id="chartProgress" class="select"></select></div>
+            </div>
+            <div class="two-cols">
+              <div class="field"><label>统计方式</label><select id="chartAggregation" class="select"><option value="sum">求和</option><option value="count">记录数</option><option value="mean">平均值</option><option value="nunique">去重计数</option><option value="max">最大值</option><option value="min">最小值</option></select></div>
+              <div class="field"><label>日期粒度</label><select id="chartDateGrain" class="select"><option value="auto">自动</option><option value="day">日</option><option value="week">周</option><option value="month">月</option><option value="quarter">季度</option><option value="year">年</option></select></div>
+            </div>
+            <label class="check-line chart-style-option"><input id="chartStyle3d" type="checkbox"> 立体演示风格（汇报展示用）</label>
+            <button id="runChartBtn" class="button primary full" type="button">生成专业可视化</button>
+          </aside>
+          <article class="chart-stage">
+            <div class="chart-stage-heading"><div><span class="card-kicker">LIVE CHART · PRO VISUAL</span><h4 id="chartTitle">选择字段生成图表</h4></div><div class="chart-stage-actions"><span id="chartBadge" class="micro-tag">本机计算</span><button id="saveChartBtn" class="mini-action" type="button" disabled>固定到看板</button><button id="downloadChartBtn" class="mini-action" type="button" disabled>导出 PNG</button></div></div>
+            <div id="chartCanvas" class="chart-canvas"><div class="chart-placeholder">从上方图标选择表达方式，再配置字段；支持比较、趋势、构成、关系、分布、流程和项目排期。</div></div>
+            <p id="chartInsight" class="chart-insight"></p>
+          </article>
+        </div>
+        <section class="dashboard-board" aria-labelledby="dashboardTitle">
+          <div class="dashboard-heading"><div><span class="card-kicker">POWER BI STYLE BOARD</span><h3 id="dashboardTitle">经营分析看板</h3><p>把关键图表固定到同一页面，形成可直接截图汇报的管理看板。</p></div><div><button id="clearDashboardBtn" class="button ghost" type="button">清空看板</button><button id="printDashboardBtn" class="button secondary" type="button">打印 / 导出 PDF</button></div></div>
+          <div id="dashboardGrid" class="dashboard-grid"><div class="dashboard-empty">先生成图表，再点击“固定到看板”；最多保留 6 张。</div></div>
+        </section>
+
+        <div class="sub-divider"><span>高价值业务分析</span></div>
+        <div class="advanced-analysis-grid">
+          <article class="tool-card pro-tool">
+            <span class="tool-number">01</span><h3>异常值检测</h3><p>自动找出偏离正常范围的金额、数量或指标记录，并生成异常明细表。</p>
+            <div class="field"><label>检测字段</label><select id="anomalyColumn" class="select"></select></div>
+            <div class="two-cols"><div class="field"><label>算法</label><select id="anomalyMethod" class="select"><option value="iqr">IQR 稳健检测</option><option value="zscore">Z-Score 检测</option></select></div><div class="field"><label>结果名称</label><input id="anomalyOutputName" class="input" value="异常值明细"></div></div>
+            <button id="runAnomalyBtn" class="button secondary full" type="button">检测并生成明细</button>
+          </article>
+
+          <article class="tool-card pro-tool">
+            <span class="tool-number">02</span><h3>交叉透视分析</h3><p>按两个业务维度交叉汇总，适合地区×产品、月份×渠道等分析。</p>
+            <div class="two-cols"><div class="field"><label>行维度</label><select id="pivotIndex" class="select"></select></div><div class="field"><label>列维度（可选）</label><select id="pivotColumns" class="select"></select></div></div>
+            <div class="two-cols"><div class="field"><label>数值字段</label><select id="pivotValue" class="select"></select></div><div class="field"><label>统计方式</label><select id="pivotAggregation" class="select"><option value="sum">求和</option><option value="count">计数</option><option value="mean">平均</option><option value="nunique">去重计数</option></select></div></div>
+            <button id="runPivotBtn" class="button secondary full" type="button">生成透视结果</button>
+          </article>
+
+          <article class="tool-card pro-tool featured">
+            <span class="tool-number">03</span><h3>RFM 客户价值分群</h3><p>按最近消费、消费频次和消费金额识别高价值、潜力与流失风险客户。</p>
+            <div class="field"><label>客户标识</label><select id="rfmCustomer" class="select"></select></div>
+            <div class="two-cols"><div class="field"><label>交易日期</label><select id="rfmDate" class="select"></select></div><div class="field"><label>交易金额</label><select id="rfmAmount" class="select"></select></div></div>
+            <button id="runRfmBtn" class="button primary full" type="button">生成客户分群与汇总</button>
+          </article>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="panel-summary">
+        <div class="split-panels">
+          <article class="tool-card">
+            <span class="tool-number">01</span><h3>分组汇总</h3><p>按地区、客户、日期等维度统计。</p>
+            <div class="field"><label>分组字段（可多选）</label><select id="groupColumns" class="select multi" multiple></select></div>
+            <div class="two-cols"><div class="field"><label>统计字段</label><select id="aggColumn" class="select"></select></div><div class="field"><label>统计方式</label><select id="aggMethod" class="select"><option value="count">计数</option><option value="nunique">去重计数</option><option value="sum">求和</option><option value="mean">平均值</option><option value="max">最大值</option><option value="min">最小值</option></select></div></div>
+            <div class="field"><label>结果名称</label><input id="summaryOutputName" class="input" value="汇总结果"></div>
+            <button id="runSummaryBtn" class="button primary full" type="button">生成汇总表</button>
+          </article>
+          <article class="tool-card">
+            <span class="tool-number">02</span><h3>批量拆分</h3><p>按某个字段值拆成多工作表或 ZIP 文件。</p>
+            <div class="field"><label>拆分字段</label><select id="splitColumn" class="select"></select></div>
+            <div class="field"><label>交付方式</label><select id="splitMode" class="select"><option value="sheets">一个 Excel，多工作表</option><option value="files">多个 Excel，打包 ZIP</option></select></div>
+            <div class="field"><label>文件名称</label><input id="splitOutputName" class="input" value="拆分结果"></div>
+            <button id="runSplitBtn" class="button primary full" type="button">拆分并下载</button>
+          </article>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="panel-export">
+        <div class="split-panels">
+          <article class="tool-card">
+            <span class="tool-number">01</span><h3>敏感信息脱敏</h3><p>生成新表，原始数据不改动。</p>
+            <div class="field"><label>需要脱敏的字段</label><select id="maskColumns" class="select multi tall" multiple></select></div>
+            <div class="two-cols"><div class="field"><label>脱敏方式</label><select id="maskMode" class="select"><option value="auto">自动识别</option><option value="phone">手机号</option><option value="email">邮箱</option><option value="id_card">身份证号</option><option value="bank_card">银行卡号</option><option value="name">姓名</option><option value="partial">通用部分隐藏</option></select></div><div class="field"><label>结果名称</label><input id="maskOutputName" class="input" value="脱敏结果"></div></div>
+            <button id="runMaskBtn" class="button secondary full" type="button">生成脱敏副本</button>
+          </article>
+          <article class="tool-card featured">
+            <span class="tool-number">02</span><h3>导出交付包</h3><p>结果文件附带处理摘要与质检信息。</p>
+            <div class="field"><label>选择需要导出的表（可多选）</label><select id="exportTables" class="select multi tall" multiple></select></div>
+            <div class="two-cols"><div class="field"><label>导出格式</label><select id="exportFormat" class="select"><option value="xlsx">Excel 工作簿 (.xlsx)</option><option value="csv_zip">CSV 文件包 (.zip)</option></select></div><div class="field"><label>文件名</label><input id="exportFilename" class="input" value="客户_任务号_处理结果"></div></div>
+            <label class="check-line"><input id="includeSummary" type="checkbox" checked> 添加“处理摘要”工作表</label>
+            <label class="check-line"><input id="safeCsv" type="checkbox" checked> 防止 CSV 公式注入</label>
+            <label class="check-line professional-export"><input id="professionalExport" type="checkbox"> 专业 V3 交付包：在 Excel 中加入验收清单并应用交付样式</label>
+            <button id="runExportBtn" class="button primary full" type="button">生成并下载交付包</button>
+          </article>
+        </div>
+      </section>
+
+      <section class="operation-log" id="operationLog">
+        <div class="panel-header"><div><h3>处理记录</h3><p>记录规则与行列变化，不记录客户原始内容。</p></div><span id="operationCount" class="micro-tag">0 步</span></div>
+        <div id="operationList" class="operation-list"><div class="blank-log">处理操作将在这里显示</div></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="confirmModal" class="modal-backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <h3 id="modalTitle">确认操作</h3><p id="modalMessage"></p>
+      <div class="modal-actions"><button id="modalCancel" class="button ghost">取消</button><button id="modalConfirm" class="button danger">确认清空</button></div>
+    </div>
+  </div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

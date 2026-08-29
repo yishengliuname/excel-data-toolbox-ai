@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "excel-data-toolbox-ai"
+version = "9.9.0"
+description = "Local-first AI workspace for safe Excel cleaning, analysis, visualization and management reports"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{name = "Excel Data Toolbox contributors"}]
+keywords = ["excel", "data-cleaning", "data-analysis", "ai", "deepseek", "power-bi"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Office/Business :: Financial :: Spreadsheet",
+]
+dependencies = [
+  "pandas>=2.2,<4",
+  "numpy>=1.26,<3",
+  "openpyxl>=3.1,<4",
+]
+
+[project.optional-dependencies]
+automation = [
+  "duckdb>=1.4,<2",
+  "pdfplumber>=0.11,<1",
+  "Pillow>=11,<13",
+  "pytesseract>=0.3.13,<1",
+  "pyodbc>=5,<6",
+  "sqlglot>=27,<30",
+]
+dev = [
+  "pytest>=8,<10",
+  "ruff>=0.12,<1",
+  "coverage[toml]>=7,<8",
+  "build>=1.2,<2",
+]
+
+[project.scripts]
+excel-data-toolbox = "excel_data_toolbox.server:main"
+
+[tool.setuptools]
+packages = ["excel_data_toolbox", "excel_data_toolbox.web"]
+include-package-data = true
+
+[tool.setuptools.package-dir]
+excel_data_toolbox = "."
+
+[tool.setuptools.package-data]
+excel_data_toolbox = ["domain_packs.json", "web/*.html", "web/*.css", "web/*.js"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers --tb=short"
+cache_dir = ".test_cache"
+markers = [
+  "customer_acceptance: sequential real-customer delivery acceptance",
+  "network: explicitly confirmed external model/API test",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+exclude = ["user_data", "outputs", "acceptance_reports", ".venv", ".pytest_cache", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = ["E501"]
+
+[tool.coverage.run]
+branch = true
+source = ["excel_data_toolbox"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 70

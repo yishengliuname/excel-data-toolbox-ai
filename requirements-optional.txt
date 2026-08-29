@@ -1,0 +1,5 @@
+duckdb>=1.4,<2
+pdfplumber>=0.11,<1
+Pillow>=11,<13
+pytesseract>=0.3.13,<1
+pyodbc>=5,<6
