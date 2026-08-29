@@ -58,7 +58,7 @@ excel_data_toolbox = ["domain_packs.json", "web/*.html", "web/*.css", "web/*.js"
 minversion = "8.0"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-ra --strict-markers --tb=short"
+addopts = "-ra --strict-markers --tb=short --import-mode=importlib"
 cache_dir = ".test_cache"
 markers = [
   "customer_acceptance: sequential real-customer delivery acceptance",

@@ -1,5 +1,13 @@
 """Public API for the Excel data toolbox core engine."""
 
+# Pytest may import the repository root ``__init__.py`` as a stand-alone
+# module when a checkout directory contains hyphens (for example the default
+# GitHub Actions checkout).  Give relative imports their canonical package
+# context in that narrow case; normal installed imports already set this
+# value and are unaffected.
+if not __package__:
+    __package__ = "excel_data_toolbox"
+
 from .analytics import (
     CategoryContributionResult,
     DataQualityReport,
