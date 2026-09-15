@@ -43,7 +43,7 @@ jobs:
         run: python -m build
       - name: Build and smoke-test Windows package
         shell: pwsh
-        run: .\scripts\build_windows.ps1 -UseCurrentEnvironment
+        run: .\scripts\build_windows.ps1 -RecreateEnvironment
       - name: Resolve release notes
         shell: pwsh
         run: |

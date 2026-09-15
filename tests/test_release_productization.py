@@ -46,3 +46,9 @@ def test_pyinstaller_spec_includes_runtime_assets() -> None:
     spec = (ROOT / "BiaogeKuaichuAI.spec").read_text(encoding="utf-8")
     assert "('web', 'web')" in spec
     assert "('domain_packs.json', '.')" in spec
+
+
+def test_release_workflow_builds_in_a_clean_environment() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "build_windows.ps1 -RecreateEnvironment" in workflow
+    assert "build_windows.ps1 -UseCurrentEnvironment" not in workflow

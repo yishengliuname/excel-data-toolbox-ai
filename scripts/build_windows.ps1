@@ -12,6 +12,41 @@ $dist = Join-Path $projectDir 'dist'
 $appDist = Join-Path $dist 'BiaogeKuaichuAI'
 $archive = Join-Path $dist 'Excel-Data-Toolbox-AI-Windows-x64.zip'
 
+function Resolve-PythonExecutable {
+    $projectPython = Join-Path $projectDir '.venv\Scripts\python.exe'
+    if (Test-Path -LiteralPath $projectPython) {
+        return $projectPython
+    }
+
+    $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($pythonCommand) {
+        try {
+            $resolved = (& $pythonCommand.Source -c "import sys; print(sys.executable)").Trim()
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $resolved)) {
+                return $resolved
+            }
+        }
+        catch {
+            # Microsoft Store can leave a non-executable python.exe alias on PATH.
+        }
+    }
+
+    $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($launcher) {
+        try {
+            $resolved = (& $launcher.Source -3 -c "import sys; print(sys.executable)").Trim()
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $resolved)) {
+                return $resolved
+            }
+        }
+        catch {
+            # Continue to the actionable error below.
+        }
+    }
+
+    throw 'No runnable Python 3 interpreter was found. Install Python 3.11+ or activate a virtual environment.'
+}
+
 Push-Location $projectDir
 try {
     $env:PYTHONNOUSERSITE = '1'
@@ -20,7 +55,7 @@ try {
     $env:PYTHONUSERBASE = Join-Path $projectDir '.build_userbase'
 
     if ($UseCurrentEnvironment) {
-        $python = (Get-Command python.exe -ErrorAction Stop).Source
+        $python = Resolve-PythonExecutable
     }
     else {
         $resolvedBuildEnvironment = [System.IO.Path]::GetFullPath($buildEnvironment)
@@ -33,7 +68,7 @@ try {
         }
         $python = Join-Path $resolvedBuildEnvironment 'Scripts\python.exe'
         if (-not (Test-Path -LiteralPath $python)) {
-            $bootstrap = (Get-Command python.exe -ErrorAction Stop).Source
+            $bootstrap = Resolve-PythonExecutable
             & $bootstrap -m venv $resolvedBuildEnvironment
             if ($LASTEXITCODE -ne 0) { throw 'Failed to create the isolated build environment.' }
         }
