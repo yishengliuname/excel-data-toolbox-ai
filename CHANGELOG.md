@@ -2,6 +2,8 @@
 
 ## 9.9.0 - 2026-08-25
 
+- Published the open-source repository with an English-first README, repeatable synthetic demo, community templates, and release documentation.
+- Added a version-checked GitHub Release workflow and reproducible Windows PyInstaller packaging with executable smoke tests.
 - 增加版本化数据合同、结构漂移检测和跨字段规则校验。
 - 增加不保存客户原值的处理血缘与审计证据包。
 - 增加持久化后台任务、进度、取消、失败重试和重启恢复。

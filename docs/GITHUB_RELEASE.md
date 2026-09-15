@@ -1,71 +1,76 @@
-# GitHub 发布与协作指南
+# Maintainer release guide
 
-这份项目按“代码公开、密钥私有、客户数据不入库”的方式准备。发布前请先完成本页检查；不要把客户 Excel、`.env`、日志或导出报告提交到 GitHub。
+Use this checklist for every public release. The current package version is defined in `pyproject.toml`; the application version and release tag must match it.
 
-## 首次发布
-
-在 GitHub 新建一个空仓库（建议不要勾选自动生成 README、许可证或 `.gitignore`），然后在本地项目目录执行：
+## 1. Verify the working tree
 
 ```powershell
-git init -b main
-git add .
-git diff --cached --name-only
-python scripts/check_secrets.py
-git commit -m "chore: prepare open-source release"
-git remote add origin https://github.com/<owner>/<repository>.git
-git push -u origin main
+git status --short
+git diff --check
 ```
 
-`git diff --cached --name-only` 是人工复核点：列表中不应出现 `.env`、真实客户数据、`outputs/`、`user_data/`、日志或打包产物。密钥扫描只输出文件名和规则编号，不会回显密钥。
+Do not release from a tree containing `.env`, customer files, outputs, logs, databases, caches, or generated binaries.
 
-后续开发建议使用分支和 Pull Request：
-
-```powershell
-git switch -c feat/<short-description>
-git push -u origin feat/<short-description>
-```
-
-## GitHub 仓库设置
-
-创建仓库后，在 Settings 中完成：
-
-1. 启用 Actions，并将默认工作流权限保持为“只读”；本项目的 CI 已声明最小权限。
-2. 启用 Secret scanning 和 Push protection；如果密钥曾经进入历史，先撤销并轮换，再清理历史。
-3. 启用 Dependabot alerts 和 security updates；仓库中的 `.github/dependabot.yml` 已配置每周检查 Python 与 Actions 依赖。
-4. 启用 Private vulnerability reporting，让安全问题通过私下渠道提交。
-5. 为 `main` 配置分支保护：要求 CI 通过、要求 PR、禁止直接推送和强制推送。
-
-## 邀请协作者
-
-在 Settings → Collaborators 中按 GitHub 用户名或团队邀请。权限按职责分配：
-
-- `Triage`：只处理 Issue，适合业务测试人员。
-- `Write`：提交分支和 Pull Request，适合日常开发者。
-- `Maintain`：管理 Issue、Actions 和发布，适合核心维护者。
-- `Admin`：仅给项目所有者或受信任的发布负责人。
-
-不要为了“方便修复”给所有人 `Admin`。客户原始数据仍通过私下渠道提供，不通过公开 Issue 或 PR 附件传递。
-
-## 发布前验收
-
-本地建议按以下顺序执行：
+## 2. Run safety and quality gates
 
 ```powershell
 python -m pip install -e ".[automation,dev]"
 python scripts/check_secrets.py
 python -m ruff check . --select E9,F63,F7,F82
+python scripts/check_docs_links.py
 python -m pytest -q
 python -m build
 ```
 
-如果测试使用假密钥，必须明确带有 `unit-test` 或 `fake-` 标记；生产密钥绝不能出现在源码、测试、截图、Issue、Actions 日志或构建产物中。
+## 3. Verify the version
 
-## 客户数据交付边界
+For v9.9.0:
 
-源码仓库只包含通用引擎、领域包、示例配置和测试。真实客户文件应保存在客户授权的本地或私有存储中。对外提交时只提交脱敏后的最小复现样例，并确认没有姓名、电话、地址、账号、订单号、财务凭证或 API key。
+```powershell
+python scripts/check_release_version.py --tag v9.9.0
+```
 
-## 官方参考
+The check compares the tag, `pyproject.toml`, and the application version exposed by `/health`.
 
-- [GitHub 社区健康文件](https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/creating-a-default-community-health-file)
-- [GitHub Secret scanning](https://docs.github.com/en/code-security/concepts/secret-security/secret-scanning)
-- [GitHub Dependabot 配置参考](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference)
+## 4. Build the Windows package
+
+On Windows:
+
+```powershell
+.\scripts\build_windows.ps1 -RecreateEnvironment
+```
+
+The script creates an isolated build environment, builds the existing PyInstaller specification, runs a local HTTP/demo/export smoke test, and creates `dist/Excel-Data-Toolbox-AI-Windows-x64.zip`.
+
+The ZIP must not contain `.env`, customer data, outputs, logs, test caches, or development sources.
+
+## 5. Create and push the tag
+
+Only tag a commit after the checks above pass and CI on `main` is green.
+
+```powershell
+git tag -a v9.9.0 -m "Excel Data Toolbox AI v9.9.0"
+git push origin v9.9.0
+```
+
+Pushing a `v*` tag triggers `.github/workflows/release.yml`. Add matching notes at `docs/RELEASE_NOTES_<tag>.md` before tagging (for example, `docs/RELEASE_NOTES_v9.9.0.md`). The workflow repeats the safety scan, static checks, tests, version check, Python build, Windows package build, and executable smoke test before creating the GitHub Release with the Windows ZIP, wheel, and source distribution.
+
+## 6. Verify the GitHub Release
+
+1. Confirm the workflow is green.
+2. Download `Excel-Data-Toolbox-AI-Windows-x64.zip` from a clean Windows computer.
+3. Extract it outside the repository.
+4. Run `BiaogeKuaichuAI.exe`.
+5. Confirm `/health` reports the release version.
+6. Load synthetic demo data.
+7. Export a workbook and open it in desktop Excel or LibreOffice.
+8. Confirm no API key is required for the local demo.
+
+Do not call a release complete until the clean-machine download test passes.
+
+## Release safety notes
+
+- Revoke any credential that has ever appeared in a public commit, issue, screenshot, or Actions log.
+- Keep Actions permissions read-only except for the release job's `contents: write` permission.
+- Publish binaries only as GitHub Release assets; never commit `.exe`, `.zip`, `build/`, or `dist/`.
+- Use only synthetic data in release screenshots and smoke tests.

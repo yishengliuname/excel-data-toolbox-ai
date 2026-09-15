@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "excel-data-toolbox-ai"
 version = "9.9.0"
-description = "Local-first AI workspace for safe Excel cleaning, analysis, visualization and management reports"
+description = "Local-first AI workspace that turns messy Excel and CSV files into cleaned, analyzed, and auditable workbooks"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [{name = "Excel Data Toolbox contributors"}]
-keywords = ["excel", "data-cleaning", "data-analysis", "ai", "deepseek", "power-bi"]
+keywords = ["excel", "excel-automation", "spreadsheet", "data-cleaning", "data-analysis", "business-intelligence", "local-first", "ai", "python"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python :: 3",
@@ -24,6 +24,11 @@ dependencies = [
   "numpy>=1.26,<3",
   "openpyxl>=3.1,<4",
 ]
+
+[project.urls]
+Repository = "https://github.com/yishengliuname/excel-data-toolbox-ai"
+Issues = "https://github.com/yishengliuname/excel-data-toolbox-ai/issues"
+Changelog = "https://github.com/yishengliuname/excel-data-toolbox-ai/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 automation = [
@@ -39,6 +44,7 @@ dev = [
   "ruff>=0.12,<1",
   "coverage[toml]>=7,<8",
   "build>=1.2,<2",
+  "pyinstaller>=6,<7",
 ]
 
 [project.scripts]

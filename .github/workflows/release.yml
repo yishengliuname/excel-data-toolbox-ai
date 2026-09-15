@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-release:
+    name: Test, package, and release Windows build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+      - name: Install project and release tools
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[automation,dev]"
+      - name: Verify release version
+        run: python scripts/check_release_version.py --tag "${{ github.ref_name }}"
+      - name: Block secrets and customer data
+        run: python scripts/check_secrets.py
+      - name: Critical static checks
+        run: python -m ruff check . --select E9,F63,F7,F82
+      - name: Check internal documentation links
+        run: python scripts/check_docs_links.py
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Build Python source and wheel
+        run: python -m build
+      - name: Build and smoke-test Windows package
+        shell: pwsh
+        run: .\scripts\build_windows.ps1 -UseCurrentEnvironment
+      - name: Resolve release notes
+        shell: pwsh
+        run: |
+          $notes = "docs/RELEASE_NOTES_${{ github.ref_name }}.md"
+          if (-not (Test-Path -LiteralPath $notes)) {
+            throw "Missing release notes for ${{ github.ref_name }}: $notes"
+          }
+          "RELEASE_NOTES=$notes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Excel-Data-Toolbox-AI-${{ github.ref_name }}
+          path: |
+            dist/Excel-Data-Toolbox-AI-Windows-x64.zip
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = @("dist/Excel-Data-Toolbox-AI-Windows-x64.zip")
+          $assets += @(Get-ChildItem -Path "dist/*.whl", "dist/*.tar.gz" | ForEach-Object { $_.FullName })
+          gh release create "${{ github.ref_name }}" @assets `
+            --verify-tag `
+            --title "Excel Data Toolbox AI ${{ github.ref_name }}" `
+            --notes-file "$env:RELEASE_NOTES"

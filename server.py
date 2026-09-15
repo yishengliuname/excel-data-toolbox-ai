@@ -222,7 +222,7 @@ else:  # Supports: python server.py
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
-APP_VERSION = "9.8.0"
+APP_VERSION = "9.9.0"
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_REQUEST_BYTES = 180 * 1024 * 1024
 MAX_ROWS_PER_TABLE = 300_000

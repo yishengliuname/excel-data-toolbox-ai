@@ -1,44 +1,99 @@
+param(
+    [switch]$RecreateEnvironment,
+    [switch]$UseCurrentEnvironment,
+    [switch]$SkipSmokeTest
+)
+
 $ErrorActionPreference = 'Stop'
 
 $projectDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$entry = Join-Path $projectDir 'server.py'
+$buildEnvironment = Join-Path $projectDir '.build-venv'
 $dist = Join-Path $projectDir 'dist'
-$bundledPython = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
-if (Test-Path -LiteralPath $bundledPython) {
-    $python = $bundledPython
-}
-else {
-    $python = (Get-Command python.exe -ErrorAction Stop).Source
-}
+$appDist = Join-Path $dist 'BiaogeKuaichuAI'
+$archive = Join-Path $dist 'Excel-Data-Toolbox-AI-Windows-x64.zip'
 
 Push-Location $projectDir
 try {
     $env:PYTHONNOUSERSITE = '1'
-    # PyInstaller queries Python's user-site path even when it is disabled.
-    # Point that read-only probe at a build-local path to avoid locked roaming
-    # profile directories on managed Windows machines.
+    $env:PYTHONUTF8 = '1'
+    $env:PYTHONIOENCODING = 'utf-8'
     $env:PYTHONUSERBASE = Join-Path $projectDir '.build_userbase'
-    & $python -m pip install -r requirements.lock -r requirements-optional.txt -r requirements-build.txt
-    & $python scripts/health_check.py
-    & $python -s -m PyInstaller --noconfirm --clean --name 'BiaogeKuaichuAI' --onedir `
-        --add-data 'web;web' `
-        --hidden-import duckdb --hidden-import pdfplumber --hidden-import pytesseract `
-        --hidden-import pyodbc $entry
-    $appDist = Join-Path $dist 'BiaogeKuaichuAI'
-    $ocrSource = Join-Path ${env:ProgramFiles} 'Tesseract-OCR'
-    $ocrTarget = Join-Path $appDist 'tesseract'
-    if (Test-Path -LiteralPath $ocrSource) {
-        Copy-Item -LiteralPath $ocrSource -Destination $ocrTarget -Recurse -Force
-        $localLanguages = Join-Path $env:LOCALAPPDATA 'BiaogeKuaichu\tessdata'
-        if (Test-Path -LiteralPath $localLanguages) {
-            Copy-Item -Path (Join-Path $localLanguages '*.traineddata') `
-                -Destination (Join-Path $ocrTarget 'tessdata') -Force
-        }
+
+    if ($UseCurrentEnvironment) {
+        $python = (Get-Command python.exe -ErrorAction Stop).Source
     }
     else {
-        Write-Warning '未找到 Tesseract-OCR；发布包的图片 OCR 需要目标电脑另行安装。'
+        $resolvedBuildEnvironment = [System.IO.Path]::GetFullPath($buildEnvironment)
+        $resolvedProject = [System.IO.Path]::GetFullPath($projectDir)
+        if (-not $resolvedBuildEnvironment.StartsWith($resolvedProject + [System.IO.Path]::DirectorySeparatorChar)) {
+            throw 'Refusing to manage a build environment outside the project directory.'
+        }
+        if ($RecreateEnvironment -and (Test-Path -LiteralPath $resolvedBuildEnvironment)) {
+            Remove-Item -LiteralPath $resolvedBuildEnvironment -Recurse -Force
+        }
+        $python = Join-Path $resolvedBuildEnvironment 'Scripts\python.exe'
+        if (-not (Test-Path -LiteralPath $python)) {
+            $bootstrap = (Get-Command python.exe -ErrorAction Stop).Source
+            & $bootstrap -m venv $resolvedBuildEnvironment
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to create the isolated build environment.' }
+        }
+        & $python -m pip install --upgrade pip
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to upgrade pip in the build environment.' }
+        & $python -m pip install -e "${projectDir}[automation,dev]"
+        if ($LASTEXITCODE -ne 0) { throw 'Failed to install build dependencies.' }
     }
-    Write-Host "构建完成：$dist\BiaogeKuaichuAI" -ForegroundColor Green
+
+    $version = (& $python scripts/check_release_version.py --print-version).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to read the project version.' }
+    & $python scripts/check_release_version.py --tag "v$version"
+    if ($LASTEXITCODE -ne 0) { throw 'Release version validation failed.' }
+    & $python -m PyInstaller --noconfirm --clean BiaogeKuaichuAI.spec
+    if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed.' }
+
+    $executable = Join-Path $appDist 'BiaogeKuaichuAI.exe'
+    $internal = Join-Path $appDist '_internal'
+    $requiredFiles = @(
+        $executable,
+        (Join-Path $internal 'web\unified.html'),
+        (Join-Path $internal 'domain_packs.json')
+    )
+    foreach ($requiredFile in $requiredFiles) {
+        if (-not (Test-Path -LiteralPath $requiredFile)) {
+            throw "Windows package is missing required runtime file: $requiredFile"
+        }
+    }
+
+    Copy-Item -LiteralPath (Join-Path $projectDir 'LICENSE') -Destination $appDist -Force
+    Copy-Item -LiteralPath (Join-Path $projectDir 'NOTICE') -Destination $appDist -Force
+    Copy-Item -LiteralPath (Join-Path $projectDir 'docs\WINDOWS_RELEASE_README.txt') `
+        -Destination (Join-Path $appDist 'README.txt') -Force
+
+    if (-not $SkipSmokeTest) {
+        & $python scripts/smoke_test_windows_build.py --app-dir $appDist --expected-version $version
+        if ($LASTEXITCODE -ne 0) { throw 'Packaged application smoke test failed.' }
+    }
+
+    if (Test-Path -LiteralPath $archive) {
+        Remove-Item -LiteralPath $archive -Force
+    }
+    Compress-Archive -Path (Join-Path $appDist '*') -DestinationPath $archive -CompressionLevel Optimal
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
+    try {
+        $forbidden = $zip.Entries | Where-Object {
+            $_.FullName -match '(^|/)(\.env|user_data|outputs|logs|\.pytest_cache|\.test_cache)(/|$)' -or
+            $_.FullName -match '\.(xlsx|xlsm|csv|sqlite|db|log)$'
+        }
+        if ($forbidden) {
+            throw "Release archive contains forbidden paths: $($forbidden.FullName -join ', ')"
+        }
+    }
+    finally {
+        $zip.Dispose()
+    }
+
+    Write-Host "Windows release ready: $archive" -ForegroundColor Green
 }
 finally {
     Pop-Location

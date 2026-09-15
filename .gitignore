@@ -48,12 +48,15 @@ tmp_*/
 
 # Virtual environments and build outputs
 .venv/
+.build-venv/
+.build_userbase/
 venv/
 env/
 node_modules/
 npm-debug.log*
 build/
 dist/
+*.zip
 *.egg-info/
 .eggs/
 

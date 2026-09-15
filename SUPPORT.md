@@ -1,22 +1,26 @@
-# 获取帮助
+# Support
 
-## 使用问题
+## Usage questions
 
-请先查看 README、`docs/` 和已有 Issues。若仍无法解决，请创建 Bug Report，并提供：
+Read [README.md](README.md), the [repeatable demo](docs/DEMO.md), and existing issues first. If the problem remains, open a bug report with:
 
-- 操作系统、Python 版本和项目版本；
-- 脱敏后的工作表名、字段名、行列规模；
-- 完整错误文本与最小复现步骤；
-- `python scripts/check_secrets.py` 和相关测试结果。
+- operating system and version;
+- Python version, or Windows release package name;
+- installation method;
+- application version or commit;
+- input file type and fictionalized schema;
+- minimal reproduction steps;
+- expected and actual behavior;
+- logs with private values removed.
 
-不要上传真实客户数据、`.env`、API Key、数据库或包含个人信息的截图。
+Do not upload customer data, `.env`, API keys, databases, or screenshots containing personal information.
 
-## 功能建议
+## Feature proposals
 
-使用 Feature Request 描述业务目标、可验证的输入输出和人工判断边界。新增行业词汇请使用 Domain Pack 模板。
+Use the Feature Request template and answer: **What real Excel task are you trying to solve?** Include a fictional input shape, expected output, and the point where human judgment is required.
 
-## 安全问题
+## Security reports
 
-密钥泄漏、任意文件读取、SQL 写入、跨任务数据串联、公式注入或权限绕过不应提交公开 Issue。请按照 [安全政策](SECURITY.md)私密报告。
+Credential leakage, arbitrary file reads, SQL writes, cross-task access, formula injection, or whitelist bypasses must not be reported publicly. Follow [SECURITY.md](SECURITY.md).
 
-本社区提供力所能及的支持，但不承诺服务等级，也不替代财务、税务、法律、人力资源或审计专业意见。
+Community support is best-effort and is not accounting, tax, legal, audit, HR, or investment advice.

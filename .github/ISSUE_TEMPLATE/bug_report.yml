@@ -1,72 +1,104 @@
 name: Bug report
-description: 报告可复现的错误、崩溃或错误结果
+description: Report a reproducible error, crash, or incorrect result
 title: "[Bug] "
 body:
   - type: markdown
     attributes:
       value: |
-        请勿上传真实客户数据、API Key、`.env`、数据库或未脱敏截图。安全漏洞请按 SECURITY.md 私密报告。
+        Do not upload customer data, API keys, `.env`, databases, or private screenshots. Report security vulnerabilities privately according to SECURITY.md.
   - type: input
     id: version
     attributes:
-      label: 项目版本或提交
-      placeholder: 例如 9.9.0 / commit SHA
+      label: App version or commit
+      placeholder: 9.9.0, Windows ZIP name, or commit SHA
     validations:
       required: true
   - type: dropdown
     id: os
     attributes:
-      label: 操作系统
+      label: Operating system
       options:
         - Windows 11
         - Windows 10
         - Linux
         - macOS
-        - 其他
+        - Other
     validations:
       required: true
   - type: input
     id: python
     attributes:
-      label: Python 版本
-      placeholder: 例如 3.12.5
+      label: Python version
+      description: Enter "packaged release" if you used the Windows ZIP.
+      placeholder: 3.12.5 or packaged release
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - Windows release ZIP
+        - Editable source install
+        - Source install from requirements
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: input_type
+    attributes:
+      label: Input file type
+      options:
+        - XLSX
+        - XLSM
+        - CSV or TSV
+        - PDF or image
+        - SQLite, ODBC, or Parquet
+        - Built-in synthetic demo
+        - Other
     validations:
       required: true
   - type: textarea
     id: request
     attributes:
-      label: 脱敏后的命令与数据结构
-      description: 只提供虚构/脱敏表名、字段名、行列规模，不要提供单元格原值。
+      label: Fictionalized request and schema
+      description: Provide only synthetic sheet names, column names, and dimensions. Do not paste private cell values.
     validations:
       required: true
   - type: textarea
     id: steps
     attributes:
-      label: 最小复现步骤
+      label: Minimal reproduction
       placeholder: |
-        1. 启动...
-        2. 上传一份由代码生成的最小文件...
-        3. 执行...
+        1. Start the app...
+        2. Load the synthetic demo or a code-generated minimal file...
+        3. Run...
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
-      label: 预期结果
+      label: Expected behavior
     validations:
       required: true
   - type: textarea
     id: actual
     attributes:
-      label: 实际结果与完整错误文本
+      label: Actual behavior
     validations:
       required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Remove customer values, user names, private paths, connection strings, and credentials. Paste only the relevant error lines.
+      render: shell
   - type: checkboxes
     id: safety
     attributes:
-      label: 隐私确认
+      label: Privacy confirmation
       options:
-        - label: 我确认没有提交真实客户数据、个人信息或有效凭据。
+        - label: I confirm that this report contains no customer data, personal information, or active credentials.
           required: true
-        - label: 我已搜索现有 Issues，并尝试在最新 main 上复现。
+        - label: I searched existing issues and reproduced this on the latest release or main branch.
           required: true
