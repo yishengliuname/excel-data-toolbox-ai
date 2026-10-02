@@ -90,6 +90,10 @@ def classify_sheet_role(name: Any, frame: pd.DataFrame) -> str:
     metric_count = sum(classify_metric(column).kind in {"additive", "count", "balance", "ratio", "score"} for column in columns)
     date_count = sum(classify_metric(column).kind == "date" for column in columns)
     identifier_count = sum(classify_metric(column).kind == "identifier" for column in columns)
+    physical_metrics = sum(classify_metric(c).kind not in {"identifier", "date"} and
+                           pd.to_numeric(frame[c], errors="coerce").notna().mean() >= 0.8 for c in frame)
+    if identifier_count and physical_metrics >= 2:
+        return "fact"
     # A compact KPI/verification grid frequently has one or two rows and many
     # derived metrics.  Treat it as reference evidence, never as a new fact.
     if len(frame) <= 3 and metric_count >= 3 and date_count == 0:

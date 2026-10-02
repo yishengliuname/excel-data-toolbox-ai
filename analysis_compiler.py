@@ -17,6 +17,11 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
+from .business_contracts import (
+    MetricContract, RelationshipContract, QuestionEvidence, candidate_grain,
+    metric_contract, relationship_graph, question_evidence, numeric_values,
+)
+
 try:
     from .metric_semantics import classify_metric, classify_sheet_role, normalise, ratio_components
 except ImportError:  # pragma: no cover - direct module execution support
@@ -63,6 +68,7 @@ class AnalysisSpec:
     dimension: str = ""
     date: str = ""
     reason: str = ""
+    table_index: int = -1
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,7 @@ class ChartSpec:
     metric: str
     dimension: str
     reason: str
+    table_index: int = -1
 
 
 @dataclass(frozen=True)
@@ -98,18 +105,21 @@ class CompiledAnalysisPlan:
     analyses: tuple[AnalysisSpec, ...]
     charts: tuple[ChartSpec, ...]
     warnings: tuple[str, ...]
+    metric_contracts: tuple[MetricContract, ...] = ()
+    relationships: tuple[RelationshipContract, ...] = ()
+    question_evidence: tuple[QuestionEvidence, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 _TOPICS: Mapping[str, tuple[str, ...]] = {
-    "overview": ("分析", "整体", "全面", "总览", "经营", "情况", "看看"),
-    "profitability": ("利润", "赚钱", "毛利", "贡献", "盈利", "成本"),
-    "trend": ("趋势", "月份", "增长", "下降", "变化", "同比", "环比"),
-    "ranking": ("排名", "最好", "最差", "最高", "最低", "表现", "贡献"),
+    "overview": ("分析", "整体", "全面", "总览", "经营", "情况", "看看", "analyze", "analyse", "overview"),
+    "profitability": ("利润", "赚钱", "毛利", "贡献", "盈利", "成本", "profit", "margin"),
+    "trend": ("趋势", "月份", "增长", "下降", "变化", "同比", "环比", "trend", "monthly", "growth"),
+    "ranking": ("排名", "最好", "最差", "最高", "最低", "表现", "贡献", "ranking", "top", "best"),
     "quality": ("清洗", "重复", "缺失", "格式", "口径", "数据质量", "无效"),
-    "relationships": ("关联", "合并", "整合", "串联", "匹配", "全部看"),
+    "relationships": ("关联", "合并", "整合", "串联", "匹配", "全部看", "merge", "join", "relate"),
     "anomaly": ("异常", "风险", "关注", "问题", "预警", "失控"),
     "inventory": ("库存", "积压", "缺货", "补货", "周转", "仓库"),
     "customer": ("客户", "顾客", "会员", "满意度", "投诉", "评价"),
@@ -213,12 +223,14 @@ def _date_ratio(series: pd.Series) -> float:
 
 def _column_role(name: str, series: pd.Series) -> str:
     semantic = classify_metric(name)
-    numeric_ratio = _numeric_ratio(series)
+    numeric_ratio = float(numeric_values(series).notna().mean())
     if semantic.kind == "identifier":
         return "identifier"
-    if semantic.kind == "date" and _date_ratio(series) >= 0.5:
+    if semantic.kind == "date":
         return "date"
-    if semantic.kind in {"additive", "count", "balance", "ratio", "score"} and numeric_ratio >= 0.5:
+    if semantic.kind in {"additive", "count", "balance", "ratio", "score"} and (
+        numeric_ratio >= 0.5 or not re.search(r"类型|类别|人员|说明|名称|负责人|状态|渠道|category|type|name|person|status", name, re.I)
+    ):
         return "metric"
     if numeric_ratio >= 0.8:
         return "metric"
@@ -328,6 +340,14 @@ def compile_analysis(
 
     if len(frames) != len(source_names):
         raise ValueError("source_names 数量必须与输入表数量一致")
+    if len(set(source_names)) != len(source_names):
+        raise ValueError("source_names 必须唯一，以免混淆事实来源")
+    for frame in frames:
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            if not all(isinstance(c, str) and c == c.strip() and c for c in frame.columns) or not frame.columns.is_unique:
+                raise ValueError("分析字段必须为唯一非空字符串；请先规范化表头")
+            if len({normalise(c) for c in frame.columns}) != len(frame.columns):
+                raise ValueError("字段规范化后存在同名冲突；请确认真实字段含义后重命名")
     valid = [(index, frame, str(source_names[index])) for index, frame in enumerate(frames) if isinstance(frame, pd.DataFrame) and not frame.empty]
     if not valid:
         raise ValueError("没有可编译的非空数据表")
@@ -369,7 +389,7 @@ def compile_analysis(
         if sheet_role == "summary": score -= 600
         elif sheet_role == "notes": score -= 350
         elif sheet_role == "dimension": score -= 35
-        grain = tuple((dates + identifiers + dimensions)[:3])
+        grain = candidate_grain(frame)
         profiles.append(TableProfile(
             index=local_index, name=name, role=sheet_role, row_count=len(frame), column_count=frame.shape[1],
             fact_score=score, grain=grain, metrics=tuple(metrics), dimensions=tuple(dimensions),
@@ -379,15 +399,12 @@ def compile_analysis(
     primary_index = max(range(len(profiles)), key=lambda index: profiles[index].fact_score)
     primary = profiles[primary_index]
     fact_indices = tuple(profile.index for profile in profiles if profile.role == "fact")
-    if not fact_indices:
-        fact_indices = (primary_index,)
     fact_tables = tuple(profiles[index].name for index in fact_indices)
     primary_fields = [field for field in fields if field.table_index == primary_index]
     metric_bindings = sorted((field for field in primary_fields if field.role == "metric"), key=_metric_sort_key)
     dimension_bindings = [field for field in primary_fields if field.role == "dimension"]
     date_bindings = [field for field in primary_fields if field.role == "date"]
     identifier_bindings = [field for field in primary_fields if field.role == "identifier"]
-    concepts = {field.concept for field in fields if field.concept}
     topics = _intent_topics(user_request)
     fact_fields = [field for field in fields if field.table_index in fact_indices]
     fact_metric_bindings = sorted(
@@ -398,17 +415,31 @@ def compile_analysis(
     fact_date_bindings = [field for field in fact_fields if field.role == "date"]
 
     capabilities = {"overview", "quality", "anomaly"}
-    if fact_metric_bindings and fact_dimension_bindings:
+    contracts = tuple(metric_contract(field.table_index, field.table_name, valid_frames[field.table_index], field.field)
+                      for field in fact_metric_bindings)
+    safe_pairs = {(c.table_index, c.field) for c in contracts if c.status != "unavailable"}
+    safe_bindings = [f for f in fact_metric_bindings if (f.table_index, f.field) in safe_pairs]
+    edges = relationship_graph(valid_frames, valid_names, [profile.role for profile in profiles])
+    questions = question_evidence(topics, contracts, edges,
+        {profile.index: (*profile.dimensions, *profile.identifiers) for profile in profiles})
+    if any(profile.dimensions and any(f.table_index == profile.index for f in safe_bindings) for profile in profiles):
         capabilities.add("ranking")
-    if fact_metric_bindings and fact_date_bindings:
+    if any(len(profile.dates) == 1 and any(f.table_index == profile.index for f in safe_bindings) for profile in profiles):
         capabilities.add("trend")
     if len(valid_frames) > 1:
         capabilities.add("relationships")
     for capability, requirements in _CAPABILITY_REQUIREMENTS.items():
-        if _has_any(concepts, requirements):
+        if any(
+            any(f.table_index == profile.index for f in safe_bindings) and
+            _has_any({f.concept for f in fact_fields if f.table_index == profile.index and f.concept and
+                      (f.role != "metric" or (f.table_index, f.field) in safe_pairs)}, requirements)
+            for profile in profiles if profile.role == "fact"
+        ):
             capabilities.add(capability)
-    if "profit" in concepts or "margin" in concepts or {"revenue", "cost"}.issubset(concepts):
+    if any(re.search(r"利润|毛利|profit|margin", f.field, re.I) for f in safe_bindings):
         capabilities.add("profitability")
+    elif "profitability" in capabilities:
+        capabilities.remove("profitability")
 
     missing: list[str] = []
     evidence_messages = {
@@ -431,47 +462,44 @@ def compile_analysis(
     dimensions = tuple(field.field for field in dimension_bindings[:8])
     dates = tuple(field.field for field in date_bindings[:4])
     identifiers = tuple(field.field for field in identifier_bindings[:6])
-    analyses: list[AnalysisSpec] = [AnalysisSpec("overview", "核心经营指标", reason="按指标语义选择求和、期末、平均或加权比率")]
-    for index in fact_indices:
-        if index == primary_index:
-            continue
-        profile = profiles[index]
-        safe_metric = next(
-            (
-                field.field
-                for field in fields
-                if field.table_index == index and field.role == "metric" and field.aggregation != "unknown"
-            ),
-            "",
-        )
-        analyses.append(
-            AnalysisSpec(
-                "fact_overview",
-                f"{profile.name}事实域摘要",
-                metric=safe_metric,
-                reason="多事实图保留各事实表原始粒度，不把所有指标压到单一主表",
-            )
-        )
-    if "ranking" in capabilities:
-        analyses.append(AnalysisSpec("ranking", f"{dimensions[0]}表现排名", metric=metrics[0], dimension=dimensions[0], reason="存在可分组维度和可聚合指标"))
-    if "trend" in capabilities:
-        analyses.append(AnalysisSpec("trend", f"{metrics[0]}时间趋势", metric=metrics[0], date=dates[0], reason="存在可解析时间字段和可聚合指标"))
-    if "quality" in topics or "quality" in capabilities:
-        analyses.append(AnalysisSpec("quality", "数据质量与口径审计", reason="每次交付必须披露缺失、重复、粒度与人工核验边界"))
-    if "relationships" in capabilities:
-        analyses.append(AnalysisSpec("relationships", "跨表关系建议", reason="多表输入需要识别候选连接键和粒度风险"))
-    if "anomaly" in capabilities:
-        analyses.append(AnalysisSpec("anomaly", "异常与风险线索", metric=metrics[0] if metrics else "", reason="只输出可追溯的数据异常，不替代业务审批"))
-
+    analyses: list[AnalysisSpec] = []
     charts: list[ChartSpec] = []
-    if "ranking" in capabilities:
-        charts.append(ChartSpec("bar", f"{dimensions[0]}—{metrics[0]}排名", metrics[0], dimensions[0], "比较类别表现"))
-        if len(dimension_bindings) and classify_metric(metrics[0]).aggregation == "sum":
-            charts.append(ChartSpec("composition", f"{metrics[0]}结构占比", metrics[0], dimensions[0], "同一可加指标的结构分解"))
-    if "trend" in capabilities:
-        charts.append(ChartSpec("line", f"{metrics[0]}时间趋势", metrics[0], dates[0], "观察跨期变化"))
-    if "anomaly" in capabilities and metrics:
-        charts.append(ChartSpec("risk", "异常线索分布", metrics[0], "异常类型", "按规则聚合异常线索数量"))
+    for index in fact_indices:
+        profile = profiles[index]
+        bindings = [f for f in safe_bindings if f.table_index == index]
+        analyses.append(AnalysisSpec(
+            "overview" if index == primary_index else "fact_overview",
+            f"{profile.name}事实域摘要", metric=bindings[0].field if bindings else "",
+            reason="按独立事实域和语义契约计算，展示锚点不决定其他事实域指标",
+            table_index=index,
+        ))
+        additive = [f for f in bindings if f.aggregation == "sum"]
+        if profile.dimensions and additive:
+            metric, dimension = additive[0].field, profile.dimensions[0]
+            analyses.append(AnalysisSpec("ranking", f"{profile.name}：{dimension}排名",
+                metric=metric, dimension=dimension, reason="同一事实域的维度和可加指标", table_index=index))
+            charts.append(ChartSpec("bar", f"{profile.name}：{dimension}—{metric}", metric,
+                dimension, "比较同一事实域类别表现", table_index=index))
+            charts.append(ChartSpec("composition", f"{profile.name}：{metric}结构", metric,
+                dimension, "占比以全部类别合计为分母；非正值不绘制结构图", table_index=index))
+        if len(profile.dates) == 1 and additive:
+            metric, date = additive[0].field, profile.dates[0]
+            analyses.append(AnalysisSpec("trend", f"{profile.name}：{metric}时间趋势",
+                metric=metric, date=date, reason="仅使用该事实域唯一时间字段；不混用发生月和订单月",
+                table_index=index))
+            charts.append(ChartSpec("line", f"{profile.name}：{metric}时间趋势", metric, date,
+                "独立期间口径", table_index=index))
+    analyses.append(AnalysisSpec("quality", "数据质量与口径审计",
+        reason="每次交付必须披露缺失、重复、粒度与人工核验边界"))
+    if len(valid_frames) > 1:
+        analyses.append(AnalysisSpec("relationships", "跨表关系建议",
+            reason="披露双向覆盖率和基数；候选关系不等于已授权连接"))
+    analyses.append(AnalysisSpec("anomaly", "异常与风险线索",
+        reason="原始行异常和契约缺口可追溯，不替代业务审批"))
+    charts.append(ChartSpec("risk", "异常线索分布", "", "异常类型", "核验线索计数"))
+    for question in questions:
+        if question.status != "available":
+            missing.extend(f"{question.topic}：{item}" for item in question.missing)
 
     warnings: list[str] = []
     if domain_confidence < 0.55:
@@ -489,6 +517,7 @@ def compile_analysis(
         metrics=metrics, dimensions=dimensions, dates=dates, identifiers=identifiers,
         intent_topics=topics, capabilities=tuple(sorted(capabilities)), missing_evidence=tuple(dict.fromkeys(missing)),
         analyses=tuple(analyses), charts=tuple(charts), warnings=tuple(warnings),
+        metric_contracts=contracts, relationships=edges, question_evidence=questions,
     )
 
 

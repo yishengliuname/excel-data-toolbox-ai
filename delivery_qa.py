@@ -12,9 +12,11 @@ from datetime import datetime
 import hashlib
 import json
 import math
+import os
+import tempfile
 from pathlib import Path
 import zipfile
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import pandas as pd
 
@@ -168,16 +170,18 @@ def _read_xlsx(
     if not expected_tables:
         return {
             str(name): frame
-            for name, frame in pd.read_excel(path, sheet_name=None, dtype=object).items()
+            for name, frame in pd.read_excel(path, sheet_name=None, dtype=object, keep_default_na=False).items()
         }
-    workbook = pd.ExcelFile(path)
-    available = set(map(str, workbook.sheet_names))
+    with pd.ExcelFile(path) as workbook:
+        available = set(map(str, workbook.sheet_names))
+        raw_tables = {str(name): pd.read_excel(workbook, sheet_name=name, header=None, dtype=object,
+                                              keep_default_na=False) for name in expected_tables if name in available}
     tables: dict[str, pd.DataFrame] = {}
     for raw_name, expected in expected_tables.items():
         name = str(raw_name)
         if name not in available:
             continue
-        raw = pd.read_excel(workbook, sheet_name=name, header=None, dtype=object)
+        raw = raw_tables[name]
         expected_columns = [str(column) for column in expected.columns]
         header_index: int | None = None
         maximum_scan = min(len(raw), 100)
@@ -189,13 +193,17 @@ def _read_xlsx(
         if header_index is None:
             # Preserve a useful failed comparison rather than hiding a missing
             # or corrupted header behind an exception.
-            tables[name] = pd.read_excel(workbook, sheet_name=name, dtype=object)
+            tables[name] = raw
             continue
         start = header_index + 1
-        data = raw.iloc[start : start + len(expected), : len(expected_columns)].copy()
+        # Do not truncate to the expected row count: otherwise a corrupted
+        # export with appended records would incorrectly pass acceptance.
+        data = raw.iloc[start:, : len(expected_columns)].copy()
         data.columns = expected_columns
         data = data.reset_index(drop=True)
         tables[name] = data
+    for name in available - set(tables):
+        tables[name] = pd.DataFrame()
     return tables
 
 
@@ -205,7 +213,7 @@ def _read_zip(path: Path) -> dict[str, pd.DataFrame]:
         for member in archive.namelist():
             if member.lower().endswith(".csv") and not member.endswith("/"):
                 with archive.open(member) as stream:
-                    tables[Path(member).stem] = pd.read_csv(stream, dtype=object)
+                    tables[Path(member).stem] = pd.read_csv(stream, dtype=object, keep_default_na=False)
     return tables
 
 
@@ -223,15 +231,17 @@ def verify_delivery(
     """
 
     path = Path(artifact).resolve()
+    if not expected_tables:
+        raise ValueError("验收必须提供至少一张预期表，禁止空验收通过")
     if not path.is_file():
         raise FileNotFoundError(f"交付文件不存在：{path}")
     suffix = path.suffix.lower()
-    if suffix == ".xlsx":
+    if suffix in {".xlsx", ".xlsm"}:
         actual_tables = _read_xlsx(path, expected_tables)
     elif suffix == ".zip":
         actual_tables = _read_zip(path)
     elif suffix == ".csv":
-        actual_tables = {path.stem: pd.read_csv(path, dtype=object)}
+        actual_tables = {path.stem: pd.read_csv(path, dtype=object, keep_default_na=False)}
     else:
         raise ValueError("自动验收仅支持 .xlsx、.csv 或 .zip")
 
@@ -300,8 +310,9 @@ def verify_delivery(
     extras = sorted(set(actual_tables) - expected_names)
     if extras and not allow_extra_tables:
         warnings.append(f"发现未声明的数据表：{'、'.join(extras)}")
+        total += 1
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    status = "passed" if all(item.status == "passed" for item in results) else "failed"
+    status = "passed" if all(item.status == "passed" for item in results) and not (extras and not allow_extra_tables) else "failed"
     return DeliveryAcceptance(
         status=status,
         artifact=path.name,
@@ -312,6 +323,38 @@ def verify_delivery(
         tables=tuple(results),
         warnings=tuple(warnings),
     )
+
+
+def export_verified(
+    tables: Mapping[str, pd.DataFrame], destination: str | Path, *,
+    writer: Callable[[Mapping[str, pd.DataFrame], Path], Any],
+    extra_validator: Callable[[Path], Any] | None = None,
+    allow_extra_tables: bool = False,
+) -> DeliveryAcceptance:
+    """Stage → reopen/verify → optional domain QA → atomically publish.
+
+    A failed writer or validator leaves the previously delivered file intact.
+    No download should be registered and no success state committed until this
+    function returns. Staging stays on the destination filesystem.
+    """
+    target = Path(destination).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    handle, name = tempfile.mkstemp(prefix=".delivery-", suffix=target.suffix, dir=target.parent)
+    os.close(handle)
+    staging = Path(name)
+    try:
+        writer(tables, staging)
+        acceptance = verify_delivery(staging, tables, allow_extra_tables=allow_extra_tables)
+        if acceptance.status != "passed":
+            failed = [item.table for item in acceptance.tables if item.status != "passed"]
+            raise ValueError("交付验收失败：" + "、".join([*failed, *acceptance.warnings]))
+        if extra_validator is not None:
+            extra_validator(staging)
+        staging.replace(target)
+        from dataclasses import replace
+        return replace(acceptance, artifact=target.name)
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 def acceptance_frame(report: DeliveryAcceptance) -> pd.DataFrame:
@@ -349,6 +392,7 @@ __all__ = [
     "TableAcceptance",
     "acceptance_frame",
     "dataframe_fingerprint",
+    "export_verified",
     "verify_delivery",
     "write_acceptance_json",
 ]

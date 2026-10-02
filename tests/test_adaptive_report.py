@@ -52,9 +52,13 @@ class AdaptiveReportTests(unittest.TestCase):
             source_names=["一月业务", "二月业务", "区域负责人", "口径说明"],
             user_request="全面分析整体表现、趋势、排名、异常并生成老板能直接看的 Excel 报表",
         )
-        self.assertEqual(len(result.outputs), 9)
-        self.assertEqual(result.report["combined_table_count"], 2)
-        self.assertEqual(result.report["primary_row_count"], 5)
+        self.assertEqual(len(result.outputs), 12)
+        self.assertEqual(result.report["combined_table_count"], 1)
+        self.assertEqual(result.report["primary_row_count"], 3)
+        # Identical schemas alone must not merge periods or silently delete T003.
+        self.assertEqual(len(result.outputs["事实域明细"]), 6)
+        self.assertIn("语义契约", result.outputs)
+        self.assertIn("问题与证据", result.outputs)
         self.assertGreaterEqual(result.report["metric_count"], 3)
         self.assertGreaterEqual(result.report["dimension_count"], 2)
         self.assertFalse(result.outputs["分类排名"].empty)
@@ -100,7 +104,7 @@ class AdaptiveReportTests(unittest.TestCase):
         assert result.outputs["分类排名"]["来源事实表"].eq("退款事实").any()
         assert "退款事实.退款金额" in result.outputs["时间趋势"].columns
 
-    def test_native_xlsx_export_contains_nine_sheets_and_charts(self) -> None:
+    def test_native_xlsx_export_contains_contract_sheets_and_charts(self) -> None:
         result = build_adaptive_analysis_report(
             _unfamiliar_tables(),
             source_names=["一月业务", "二月业务", "区域负责人", "口径说明"],

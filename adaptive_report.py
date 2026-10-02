@@ -1,9 +1,9 @@
 """General-purpose adaptive analysis for unfamiliar structured workbooks.
 
 The engine is intentionally deterministic.  It profiles every uploaded table,
-infers column roles from names/types/value distributions, selects a primary
-fact-like table, combines truly isomorphic period sheets, and generates a
-fully auditable management workbook.  It is the local fallback after specific
+infers column roles from names/types/value distributions, binds measures to
+independent fact tables, and generates an evidence-gated management workbook.
+The primary table is only a display anchor. It is the local fallback after specific
 sales, inventory, HR and finance workflows have had the opportunity to match.
 """
 
@@ -19,10 +19,12 @@ import pandas as pd
 
 try:
     from .analysis_compiler import compile_analysis
-    from .metric_semantics import aggregate_metric, classify_metric, classify_sheet_role, grouped_metric
+    from .metric_semantics import classify_metric, classify_sheet_role, grouped_metric
+    from .business_contracts import contracts_frame, evaluate_metric, questions_frame, numeric_values
 except ImportError:  # Supports: python adaptive_report.py
     from excel_data_toolbox.analysis_compiler import compile_analysis
-    from excel_data_toolbox.metric_semantics import aggregate_metric, classify_metric, classify_sheet_role, grouped_metric
+    from excel_data_toolbox.metric_semantics import classify_metric, classify_sheet_role, grouped_metric
+    from excel_data_toolbox.business_contracts import contracts_frame, evaluate_metric, questions_frame, numeric_values
 
 
 _NON_WORD = re.compile(r"[\s_\-（）()【】\[\]：:/.]+")
@@ -37,7 +39,7 @@ def _normalise(value: Any) -> str:
     return _NON_WORD.sub("", str(value or "")).casefold()
 
 
-def _text(value: Any, *, limit: int = 160) -> str:
+def _text(value: Any, *, limit: int | None = 160) -> str:
     if value is None or (not isinstance(value, str) and pd.isna(value)):
         return ""
     cleaned = re.sub(r"\s+", " ", str(value)).strip()
@@ -51,11 +53,13 @@ def _numeric(series: pd.Series) -> tuple[pd.Series, float, bool]:
         converted = pd.to_numeric(series, errors="coerce")
         return converted, float(converted.notna().mean()), False
     raw = series.astype("string").str.strip()
-    percent = bool(raw.str.contains(r"[%％]", na=False).mean() >= 0.5)
-    cleaned = raw.str.replace(r"[¥￥$,，元件个台套箱人次天小时%％\s]", "", regex=True)
+    percent_mask = raw.str.contains(r"[%％]", na=False)
+    percent = bool(percent_mask.any())
+    # Formatting is not unit conversion. Never strip kg/boxes/$ or guess a
+    # conversion factor. Percent notation is converted per cell, not by vote.
+    cleaned = raw.str.replace(r"[¥￥,，%％\s]", "", regex=True)
     converted = pd.to_numeric(cleaned, errors="coerce")
-    if percent:
-        converted = converted / 100.0
+    converted = converted.where(~percent_mask, converted / 100.0)
     denominator = int(raw.ne("").sum())
     ratio = float(converted.notna().sum() / denominator) if denominator else 0.0
     return converted, ratio, percent
@@ -129,23 +133,26 @@ def infer_column_roles(frame: pd.DataFrame) -> dict[str, dict[str, Any]]:
 def _clean_frame(frame: pd.DataFrame, roles: Mapping[str, Mapping[str, Any]] | None = None) -> tuple[pd.DataFrame, int]:
     work = frame.copy(deep=True)
     work.columns = [str(column).strip() or f"未命名字段{index + 1}" for index, column in enumerate(work.columns)]
-    work = work.dropna(axis=0, how="all").dropna(axis=1, how="all")
     # Re-infer after header cleanup so integer/blank/whitespace headers cannot
     # make the role dictionary drift away from the actual columns.
     roles = infer_column_roles(work)
     for column in work.columns:
         role = roles.get(column, {}).get("role")
         if role == "日期":
-            work[column] = pd.to_datetime(work[column], errors="coerce", yearfirst=True, format="mixed")
+            parsed = pd.to_datetime(work[column], errors="coerce", yearfirst=True, format="mixed")
+            if parsed.notna().all():
+                work[column] = parsed
         elif role in {"数值指标", "比例/评分"}:
             numeric_values, ratio, _ = _numeric(work[column])
-            if ratio >= 0.6:
+            if ratio == 1.0 and numeric_values.notna().all():
                 work[column] = numeric_values
         elif role not in {"标识符", "文本标识"}:
-            work[column] = work[column].map(_text)
+            work[column] = work[column].map(lambda value: _text(value, limit=None))
     before = len(work)
-    work = work.drop_duplicates(keep="first").reset_index(drop=True)
-    return work, before - len(work)
+    duplicates = int(work.duplicated().sum())
+    work = work.reset_index(drop=True)
+    assert len(work) == before
+    return work, duplicates
 
 
 def _schema(frame: pd.DataFrame) -> tuple[str, ...]:
@@ -220,7 +227,7 @@ def build_adaptive_analysis_report(
     top_n: int = 10,
     outlier_multiplier: float = 1.5,
 ) -> AdaptiveReportResult:
-    """Build an adaptive nine-sheet management report from unfamiliar tables."""
+    """Build an evidence-gated multi-fact report; never invent cleaning policy."""
 
     validate_adaptive_report_params({
         "source_names": source_names, "user_request": user_request,
@@ -237,14 +244,9 @@ def build_adaptive_analysis_report(
     compiled = compile_analysis(valid_frames, source_names=valid_names, user_request=user_request)
     sheet_roles = [classify_sheet_role(name, frame) for name, frame in zip(valid_names, valid_frames)]
     primary_local = compiled.primary_index
-    primary_schema = _schema(valid_frames[primary_local])
-    compatible = [
-        index
-        for index, frame in enumerate(valid_frames)
-        if _schema(frame) == primary_schema and sheet_roles[index] == "fact"
-    ]
-    if primary_local not in compatible:
-        compatible = [primary_local]
+    # Identical physical schemas do not establish shared periods, populations
+    # or duplicate policy. A merge must be a separate validated operation.
+    compatible = [primary_local]
 
     cleaned_frames: list[pd.DataFrame] = []
     table_roles: list[dict[str, dict[str, Any]]] = []
@@ -266,11 +268,7 @@ def build_adaptive_analysis_report(
         part.insert(0, provenance_column, valid_names[index])
         primary_parts.append(part)
     primary = pd.concat(primary_parts, ignore_index=True, sort=False)
-    primary = primary.drop_duplicates(
-        subset=[column for column in primary.columns if column != provenance_column],
-        keep="first",
-    ).reset_index(drop=True)
-    primary_roles = infer_column_roles(primary.drop(columns=[provenance_column], errors="ignore"))
+    primary = primary.reset_index(drop=True)
 
     dictionary_rows = []
     quality_rows = []
@@ -281,6 +279,7 @@ def build_adaptive_analysis_report(
         "notes": "说明/备注表（不参与计算）",
     }
     compiled_fields = {(field.table_index, field.field): field for field in compiled.fields}
+    contract_lookup = {(c.table_index, c.field): c for c in compiled.metric_contracts}
     for table_index, (name, frame, roles, duplicate_count) in enumerate(zip(valid_names, cleaned_frames, table_roles, duplicate_counts)):
         cells = max(frame.shape[0] * frame.shape[1], 1)
         missing_cells = int(frame.isna().sum().sum() + frame.astype("string").apply(lambda col: col.str.strip().eq("").sum()).sum())
@@ -303,6 +302,7 @@ def build_adaptive_analysis_report(
         for column in frame.columns:
             info = roles[column]
             binding = compiled_fields.get((table_index, str(column)))
+            contract = contract_lookup.get((table_index, str(column)))
             samples = [value for value in frame[column].dropna().map(_text).unique().tolist() if value][:3]
             dictionary_rows.append({
                 "数据表": name, "字段": column, "推断角色": info["role"], "数据类型": str(frame[column].dtype),
@@ -312,214 +312,123 @@ def build_adaptive_analysis_report(
                 "非空数": int(frame[column].notna().sum()), "缺失率": info["missing_rate"], "唯一值数": info["unique_count"],
                 "唯一性": info["uniqueness"], "示例值": "｜".join(samples),
                 "推断依据": "字段业务语义优先，其次为数据类型、可解析比例和基数分布",
+                "语义契约状态": contract.status if contract else "不参与计算",
+                "计算限制": "；".join(contract.issues) if contract else "",
             })
 
-    relations = []
-    for left in range(len(cleaned_frames)):
-        for right in range(left + 1, len(cleaned_frames)):
-            if sheet_roles[left] in {"summary", "notes"} or sheet_roles[right] in {"summary", "notes"}:
-                continue
-            left_map = {_normalise(column): column for column in cleaned_frames[left].columns}
-            right_map = {_normalise(column): column for column in cleaned_frames[right].columns}
-            shared = [key for key in left_map if key and key in right_map]
-            for key in shared[:8]:
-                lcol, rcol = left_map[key], right_map[key]
-                lvals = set(cleaned_frames[left][lcol].dropna().map(_text)) - {""}
-                rvals = set(cleaned_frames[right][rcol].dropna().map(_text)) - {""}
-                if not lvals or not rvals:
-                    continue
-                coverage = len(lvals & rvals) / max(min(len(lvals), len(rvals)), 1)
-                left_unique = cleaned_frames[left][lcol].dropna().astype("string").is_unique
-                right_unique = cleaned_frames[right][rcol].dropna().astype("string").is_unique
-                if coverage < 0.2:
-                    continue
-                relation = "一对一" if left_unique and right_unique else ("多对一" if right_unique else ("一对多" if left_unique else "多对多/需核验"))
-                relations.append({
-                    "左表": valid_names[left], "右表": valid_names[right], "关联字段": f"{lcol} ↔ {rcol}",
-                    "建议关系": relation, "值覆盖率": coverage,
-                    "置信度": "高" if coverage >= 0.8 and (left_unique or right_unique) else ("中" if coverage >= 0.5 else "低"),
-                    "人工核验": "核对字段业务含义及重复键后再执行正式连接",
-                })
-    relation_frame = pd.DataFrame(relations, columns=["左表", "右表", "关联字段", "建议关系", "值覆盖率", "置信度", "人工核验"])
-
-    inferred_metrics = sorted(
-        [column for column, info in primary_roles.items() if info["role"] in {"数值指标", "比例/评分"}],
-        key=_metric_priority,
-    )
-    metric_columns = [column for column in compiled.metrics if column in primary.columns]
-    metric_columns.extend(column for column in inferred_metrics if column not in metric_columns)
-    metric_columns = metric_columns[:12]
-    # Keep unknown numeric fields visible in the audit/dictionary, but never
-    # invent a mean or total for them.  Ranking falls back to record count when
-    # there is no semantically safe additive/count metric.
-    aggregatable_metrics = [
-        column
-        for column in metric_columns
-        if classify_metric(column).aggregation in {"sum", "count", "distinct_count"}
-    ]
-    date_columns = [column for column in compiled.dates if column in primary.columns]
-    date_columns.extend(
-        column for column, info in primary_roles.items() if info["role"] == "日期" and column not in date_columns
-    )
-    category_columns = [column for column in compiled.dimensions if column in primary.columns]
-    category_columns.extend(
-        column for column, info in primary_roles.items() if info["role"] == "分类维度" and column not in category_columns
-    )
-    identifier_columns = [column for column in compiled.identifiers if column in primary.columns]
-    identifier_columns.extend(
-        column for column, info in primary_roles.items() if info["role"] == "标识符" and column not in identifier_columns
-    )
-    key_column = next((column for column in identifier_columns if primary_roles[column]["uniqueness"] >= 0.8), identifier_columns[0] if identifier_columns else None)
-
+    relation_frame = pd.DataFrame([{
+        "左表": edge.left_table, "右表": edge.right_table,
+        "关联字段": f"{edge.left_key} ↔ {edge.right_key}",
+        "建议关系": edge.cardinality, "值覆盖率": edge.left_row_coverage,
+        "左侧行覆盖率": edge.left_row_coverage, "右侧行覆盖率": edge.right_row_coverage,
+        "左侧键覆盖率": edge.left_key_coverage, "右侧键覆盖率": edge.right_key_coverage,
+        "状态": edge.status, "人工核验": edge.reason,
+    } for edge in compiled.relationships], columns=[
+        "左表", "右表", "关联字段", "建议关系", "值覆盖率", "左侧行覆盖率",
+        "右侧行覆盖率", "左侧键覆盖率", "右侧键覆盖率", "状态", "人工核验",
+    ])
+    metric_columns = [c.field for c in compiled.metric_contracts if c.table_index == primary_local]
+    identifier_columns = list(compiled.table_profiles[primary_local].identifiers)
+    key_column = identifier_columns[0] if identifier_columns else None
     overview_rows = [
-        {"指标": "分析主题", "结果": _text(user_request, limit=500) or "通用自适应数据分析", "单位": "", "数据口径": "用户自然语言需求；未提供时采用通用经营分析"},
-        {"指标": "识别经营领域", "结果": compiled.domain_label, "单位": "", "数据口径": f"配置化领域词典匹配；置信度 {compiled.domain_confidence:.0%}"},
-        {"指标": "已启用分析", "结果": "、".join(compiled.capabilities), "单位": "", "数据口径": "仅启用现有字段证据能够支持的分析能力"},
-        {"指标": "证据缺口", "结果": "；".join(compiled.missing_evidence) or "未发现用户明确要求但证据不足的主题", "单位": "", "数据口径": "证据不足时不猜测、不强行计算"},
-        {"指标": "主数据粒度", "结果": " + ".join(compiled.table_profiles[primary_local].grain) or "待人工确认", "单位": "", "数据口径": "按日期、标识符和分类维度推断"},
-        {"指标": "上传数据表", "结果": len(valid_frames), "单位": "张", "数据口径": "非空工作表数量"},
-        {"指标": "主分析表", "结果": primary_name, "单位": "", "数据口径": "按行列规模、数值/日期/分类字段丰富度自动选择"},
-        {"指标": "识别事实域", "结果": len(compiled.fact_indices), "单位": "张", "数据口径": "每张事实表保持原始粒度；主表只用于默认明细展示"},
-        {"指标": "事实域清单", "结果": "、".join(compiled.fact_tables), "单位": "", "数据口径": "分析计划中的多事实图节点"},
-        {"指标": "同构合并表", "结果": len(compatible), "单位": "张", "数据口径": "字段集合完全一致的期间/分表自动纵向合并"},
-        {"指标": "主数据记录数", "结果": len(primary), "单位": "行", "数据口径": "同构表合并并删除完全重复行"},
-        {"指标": "识别数值指标", "结果": len(compiled.fact_metrics), "单位": "个", "数据口径": "全部事实表的字段名、类型与数值解析率综合识别"},
-        {"指标": "识别分类维度", "结果": len(compiled.fact_dimensions), "单位": "个", "数据口径": "全部事实表的低至中等基数分类字段"},
-        {"指标": "识别时间字段", "结果": len(compiled.fact_dates), "单位": "个", "数据口径": "全部事实表的字段名和日期解析率"},
-        {"指标": "建议表关系", "结果": len(relation_frame), "单位": "条", "数据口径": "同名字段、值覆盖率和键唯一性推断"},
+        {"指标": "分析主题", "结果": _text(user_request, limit=500) or "通用自适应数据分析", "单位": "", "数据口径": "用户自然语言需求"},
+        {"指标": "识别经营领域", "结果": compiled.domain_label, "单位": "", "数据口径": "词典推断，不代表确认业务口径"},
+        {"指标": "已启用分析", "结果": "、".join(compiled.capabilities), "单位": "", "数据口径": "每个分析项绑定独立事实域；不自动计算跨事实净利润"},
+        {"指标": "证据缺口", "结果": "；".join(compiled.missing_evidence) or "无额外主题缺口；推断口径仍需核验", "单位": "", "数据口径": "详见语义契约、问题与证据"},
+        {"指标": "主数据粒度", "结果": " + ".join(compiled.table_profiles[primary_local].grain) or "未验证", "单位": "", "数据口径": "经非空和唯一性检查的候选物理键；不等于确认业务粒度"},
+        {"指标": "上传数据表", "结果": len(valid_frames), "单位": "张", "数据口径": "本次显式指定的非空源表"},
+        {"指标": "主分析表", "结果": primary_name, "单位": "", "数据口径": "仅为明细展示锚点，不代表全项目经营范围"},
+        {"指标": "识别事实域", "结果": len(compiled.fact_indices), "单位": "张", "数据口径": "独立事实表原始粒度"},
+        {"指标": "事实域清单", "结果": "、".join(compiled.fact_tables), "单位": "", "数据口径": "禁止未经确认的跨事实连接或相减"},
+        {"指标": "同构合并表", "结果": 1, "单位": "张", "数据口径": "未自动合并；同字段不等于同业务范围"},
+        {"指标": "主数据记录数", "结果": len(primary), "单位": "行", "数据口径": "原记录保留；重复及无效值标记核验，不自动删除"},
+        {"指标": "识别数值指标", "结果": len(compiled.fact_metrics), "单位": "个", "数据口径": "全部事实域指标候选"},
+        {"指标": "识别分类维度", "结果": len(compiled.fact_dimensions), "单位": "个", "数据口径": "全部事实域维度候选"},
+        {"指标": "识别时间字段", "结果": len(compiled.fact_dates), "单位": "个", "数据口径": "多时间字段须明确业务时间口径"},
+        {"指标": "建议表关系", "结果": len(relation_frame), "单位": "条", "数据口径": "双向覆盖率及基数检查；当前不执行连接"},
     ]
-    for column in metric_columns[:6]:
-        values = pd.to_numeric(primary[column], errors="coerce")
-        if not values.notna().any():
-            continue
-        result, method, semantic = aggregate_metric(primary, column)
-        unit = semantic.unit or ("%/分" if primary_roles[column]["role"] == "比例/评分" else "")
-        overview_rows.append({"指标": f"核心指标：{column}", "结果": result, "单位": unit, "数据口径": method})
     for fact_index in compiled.fact_indices:
-        if fact_index == primary_local:
-            continue
-        fact_frame = cleaned_frames[fact_index]
-        safe_fields = [
-            field
-            for field in compiled.fields
-            if field.table_index == fact_index
-            and field.role == "metric"
-            and field.aggregation in {"sum", "count", "distinct_count", "end_balance"}
-        ]
-        for field in safe_fields[:3]:
-            result, method, semantic = aggregate_metric(fact_frame, field.field)
-            overview_rows.append(
-                {
-                    "指标": f"事实域：{compiled.table_profiles[fact_index].name}.{field.field}",
-                    "结果": result,
-                    "单位": semantic.unit,
-                    "数据口径": f"独立事实表聚合；{method}",
-                }
-            )
-    overview = pd.DataFrame(overview_rows)
-
-    ranking_rows = []
-    ranking_metric = aggregatable_metrics[0] if aggregatable_metrics else None
-    for dimension in category_columns[:4]:
-        if ranking_metric:
-            grouped = grouped_metric(primary, dimension, ranking_metric).rename(columns={ranking_metric: "指标值"})
-            method = aggregate_metric(primary, ranking_metric)[1]
-        else:
-            grouped = primary.groupby(dimension, dropna=False, observed=True).size().reset_index(name="指标值")
-            method = "记录数"
-        grouped = grouped.dropna(subset=["指标值"]).sort_values("指标值", ascending=False, kind="stable").head(top_n)
-        total = float(grouped["指标值"].sum())
-        for rank, (_, row) in enumerate(grouped.iterrows(), start=1):
-            ranking_rows.append({
-                "来源事实表": primary_name,
-                "分析维度": dimension, "分类": _text(row[dimension]) or "（空值）", "指标字段": ranking_metric or "记录数",
-                "汇总方式": method, "指标值": float(row["指标值"]), "排名": rank,
-                "占比": float(row["指标值"] / total) if total else float("nan"),
+        for contract in [c for c in compiled.metric_contracts if c.table_index == fact_index][:12]:
+            # Evaluate against the untouched source, not a lossy cleaned copy.
+            result, method = evaluate_metric(valid_frames[fact_index], contract)
+            overview_rows.append({
+                "指标": f"核心指标：{contract.field}" if fact_index == primary_local else f"事实域：{contract.table_name}.{contract.field}",
+                "结果": result if math.isfinite(result) else "不可计算",
+                "单位": contract.unit,
+                "数据口径": f"来源：{contract.table_name}；{contract.time_basis}；{contract.population}；{method}",
             })
+    overview = pd.DataFrame(overview_rows)
+    ranking_rows = []
+    trend_parts = []
+    primary_trend = pd.DataFrame()
+    trend_metrics = []
     for fact_index in compiled.fact_indices:
-        if fact_index == primary_local or fact_index in compatible:
-            continue
-        fact_frame = cleaned_frames[fact_index]
-        fact_metrics = [
-            field
-            for field in compiled.fact_metrics
-            if field.table_index == fact_index and field.aggregation in {"sum", "count", "distinct_count"}
-        ]
-        fact_dimensions = [field for field in compiled.fact_dimensions if field.table_index == fact_index]
-        if not fact_dimensions:
-            continue
-        fact_metric = fact_metrics[0] if fact_metrics else None
-        for dimension_binding in fact_dimensions[:2]:
-            dimension = dimension_binding.field
-            if fact_metric:
-                grouped = grouped_metric(fact_frame, dimension, fact_metric.field).rename(columns={fact_metric.field: "指标值"})
-                method = aggregate_metric(fact_frame, fact_metric.field)[1]
-                metric_name = fact_metric.field
+        profile = compiled.table_profiles[fact_index]
+        fact = valid_frames[fact_index].copy(deep=True)
+        safe_metrics = [f.field for f in compiled.fact_metrics if f.table_index == fact_index and
+                        contract_lookup[(fact_index, f.field)].status != "unavailable" and f.aggregation == "sum"]
+        for dimension in profile.dimensions[:4]:
+            metric = safe_metrics[0] if safe_metrics else None
+            if metric:
+                fact[metric] = numeric_values(fact[metric])
+                grouped = grouped_metric(fact, dimension, metric).rename(columns={metric: "指标值"})
+                method = "独立事实域求和"
             else:
-                grouped = fact_frame.groupby(dimension, dropna=False, observed=True).size().reset_index(name="指标值")
-                method = "记录数"
-                metric_name = "记录数"
-            grouped = grouped.dropna(subset=["指标值"]).sort_values("指标值", ascending=False, kind="stable").head(top_n)
+                grouped = fact.groupby(dimension, dropna=False, observed=True).size().reset_index(name="指标值")
+                method = "原始记录数（非有效订单数/非经营业绩）"
+            grouped = grouped.dropna(subset=["指标值"]).sort_values("指标值", ascending=False, kind="stable")
+            # Denominator includes every category, not only the displayed Top N.
             total = float(grouped["指标值"].sum())
-            for rank, (_, row) in enumerate(grouped.iterrows(), start=1):
+            positive = total > 0 and grouped["指标值"].ge(0).all()
+            for rank, (_, row) in enumerate(grouped.head(top_n).iterrows(), start=1):
                 ranking_rows.append({
-                    "来源事实表": compiled.table_profiles[fact_index].name,
-                    "分析维度": dimension,
-                    "分类": _text(row[dimension]) or "（空值）",
-                    "指标字段": metric_name,
-                    "汇总方式": method,
-                    "指标值": float(row["指标值"]),
-                    "排名": rank,
-                    "占比": float(row["指标值"] / total) if total else float("nan"),
+                    "来源事实表": profile.name, "分析维度": dimension,
+                    "分类": _text(row[dimension], limit=None) or "（空值）",
+                    "指标字段": metric or "原始记录数", "汇总方式": method,
+                    "指标值": float(row["指标值"]), "排名": rank,
+                    "占比": float(row["指标值"] / total) if positive else float("nan"),
                 })
+        if len(profile.dates) != 1 or not safe_metrics:
+            continue
+        date = profile.dates[0]
+        fact["月份"] = pd.to_datetime(fact[date], errors="coerce", format="mixed").dt.to_period("M").astype(str)
+        part = fact[["月份"]].drop_duplicates().sort_values("月份", kind="stable")
+        part.insert(0, "来源事实表", profile.name)
+        unit = contract_lookup[(fact_index, safe_metrics[0])].unit
+        used_metrics = [m for m in safe_metrics if contract_lookup[(fact_index, m)].unit == unit][:3]
+        for metric in used_metrics:
+            fact[metric] = numeric_values(fact[metric])
+            display = metric if fact_index == primary_local else f"{profile.name}.{metric}"
+            part = part.merge(grouped_metric(fact, "月份", metric).rename(columns={metric: display}), on="月份", how="left", validate="one_to_one")
+        part = part.reset_index(drop=True)
+        trend_parts.append(part)
+        if primary_trend.empty:
+            primary_trend = part.copy(deep=True)
+            trend_metrics = [c for c in part if c not in {"来源事实表", "月份"}]
     ranking = pd.DataFrame(ranking_rows, columns=["来源事实表", "分析维度", "分类", "指标字段", "汇总方式", "指标值", "排名", "占比"])
-
-    trend_metrics = aggregatable_metrics[:3]
-    trend = pd.DataFrame(columns=["来源事实表", "月份", *trend_metrics])
-    if date_columns and trend_metrics:
-        date_column = date_columns[0]
-        trend_source = primary.copy(deep=True)
-        trend_source[date_column] = pd.to_datetime(trend_source[date_column], errors="coerce")
-        trend_source = trend_source.dropna(subset=[date_column])
-        if not trend_source.empty:
-            trend_source["月份"] = trend_source[date_column].dt.to_period("M").astype(str)
-            trend = trend_source[["月份"]].drop_duplicates().sort_values("月份", kind="stable")
-            trend.insert(0, "来源事实表", primary_name)
-            for column in trend_metrics:
-                grouped = grouped_metric(trend_source, "月份", column)
-                trend = trend.merge(grouped, on="月份", how="left")
-    primary_trend = trend.copy(deep=True)
-    for fact_index in compiled.fact_indices:
-        if fact_index == primary_local or fact_index in compatible:
-            continue
-        fact_dates = [field for field in compiled.fact_dates if field.table_index == fact_index]
-        fact_metrics = [
-            field
-            for field in compiled.fact_metrics
-            if field.table_index == fact_index and field.aggregation in {"sum", "count", "distinct_count"}
-        ]
-        if not fact_dates or not fact_metrics:
-            continue
-        fact_frame = cleaned_frames[fact_index].copy(deep=True)
-        date_field = fact_dates[0].field
-        fact_frame[date_field] = pd.to_datetime(fact_frame[date_field], errors="coerce", format="mixed")
-        fact_frame = fact_frame.dropna(subset=[date_field])
-        if fact_frame.empty:
-            continue
-        fact_frame["月份"] = fact_frame[date_field].dt.to_period("M").astype(str)
-        fact_trend = fact_frame[["月份"]].drop_duplicates().sort_values("月份", kind="stable")
-        fact_trend.insert(0, "来源事实表", compiled.table_profiles[fact_index].name)
-        for binding in fact_metrics[:3]:
-            grouped = grouped_metric(fact_frame, "月份", binding.field).rename(
-                columns={binding.field: f"{compiled.table_profiles[fact_index].name}.{binding.field}"}
-            )
-            fact_trend = fact_trend.merge(grouped, on="月份", how="left")
-        trend = pd.concat([trend, fact_trend], ignore_index=True, sort=False)
+    trend = pd.concat(trend_parts, ignore_index=True, sort=False) if trend_parts else pd.DataFrame(columns=["来源事实表", "月份"])
 
     anomaly_rows = []
+    for fact_index in compiled.fact_indices:
+        raw = valid_frames[fact_index]
+        duplicate_mask = raw.duplicated(keep=False)
+        for position in [i for i, duplicate in enumerate(duplicate_mask) if duplicate][:2000]:
+                anomaly_rows.append({
+                    "来源表": valid_names[fact_index], "源行号": position + 2,
+                    "记录标识": f"源数据记录{position + 1}", "异常类型": "疑似重复（保留）",
+                    "异常字段": "整行", "异常值": "",
+                    "判定依据": "原始记录完全相同；尚未确认业务键与去重规则",
+                    "建议动作": "确认是否重复交易；不得按表格外观直接删除",
+                })
+        for contract in [c for c in compiled.metric_contracts if c.table_index == fact_index and c.status == "unavailable"]:
+            anomaly_rows.append({
+                "来源表": valid_names[fact_index], "源行号": "", "记录标识": "指标契约",
+                "异常类型": "指标不可计算", "异常字段": contract.field, "异常值": "",
+                "判定依据": "；".join(contract.issues), "建议动作": "补齐或确认口径后重新运行；不填零、不强行计算",
+            })
     for column in metric_columns[:8]:
         values = pd.to_numeric(primary[column], errors="coerce")
-        valid_values = values.dropna()
+        valid_values = values.loc[values.notna() & values.map(lambda v: math.isfinite(float(v)) if pd.notna(v) else False)]
         if len(valid_values) < 4:
             continue
         q1, q3 = valid_values.quantile([0.25, 0.75])
@@ -565,19 +474,33 @@ def build_adaptive_analysis_report(
         anomalies.groupby("异常类型", dropna=False, observed=True).size().reset_index(name="风险数量")
         if not anomalies.empty else pd.DataFrame(columns=["异常类型", "风险数量"])
     )
-    primary_ranking = ranking.loc[ranking["来源事实表"].eq(primary_name)] if not ranking.empty else ranking
+    usable_ranking = ranking.loc[ranking["指标字段"].ne("原始记录数")] if not ranking.empty else ranking
+    primary_ranking = usable_ranking.loc[usable_ranking["来源事实表"].eq(primary_name)] if not usable_ranking.empty else usable_ranking
+    if primary_ranking.empty and not ranking.empty:
+        pool = usable_ranking if not usable_ranking.empty else ranking
+        primary_ranking = pool.loc[pool["来源事实表"].eq(pool.iloc[0]["来源事实表"])]
     top_rank = primary_ranking.loc[primary_ranking["分析维度"].eq(primary_ranking.iloc[0]["分析维度"])] if not primary_ranking.empty else primary_ranking
-    dashboard_rows = max(len(top_rank.head(top_n)), len(primary_trend), len(risk_summary), 1)
+    share_sum = float(top_rank["占比"].sum()) if not top_rank.empty else 0.0
+    remainder = float(top_rank["指标值"].sum()) * (1.0 / share_sum - 1.0) if 0 < share_sum < 1.0 - 1e-9 else 0.0
+    dashboard_rows = max(len(top_rank) + (1 if remainder > 0 else 0), len(primary_trend), len(risk_summary), 1)
     dashboard = pd.DataFrame(index=range(dashboard_rows))
+    top_rank = top_rank.reset_index(drop=True)
+    dashboard["排名来源"] = top_rank.iloc[0]["来源事实表"] if not top_rank.empty else "无可用数据"
+    dashboard["排名口径"] = top_rank.iloc[0]["指标字段"] if not top_rank.empty else ""
+    dashboard["趋势来源"] = primary_trend.iloc[0]["来源事实表"] if not primary_trend.empty else "无可用数据"
     for column in ("分类", "指标值"):
         dashboard[f"排名{column}"] = top_rank[column].reindex(range(dashboard_rows)) if column in top_rank else pd.NA
     if not primary_trend.empty:
         dashboard["月份"] = primary_trend["月份"].reindex(range(dashboard_rows))
         for column in trend_metrics:
             if column in primary_trend: dashboard[f"趋势_{column}"] = primary_trend[column].reindex(range(dashboard_rows))
-    if any(chart.kind == "composition" for chart in compiled.charts) and not top_rank.empty:
+    if (any(chart.kind == "composition" for chart in compiled.charts) and not top_rank.empty
+            and top_rank["指标字段"].ne("原始记录数").all()
+            and top_rank["指标值"].ge(0).all() and top_rank["指标值"].sum() > 0):
         dashboard["结构分类"] = top_rank["分类"].reindex(range(dashboard_rows))
         dashboard["结构指标值"] = top_rank["指标值"].reindex(range(dashboard_rows))
+        if remainder > 0:
+            dashboard.loc[len(top_rank), ["结构分类", "结构指标值"]] = ["其他类别", remainder]
     if not risk_summary.empty:
         dashboard["异常类型"] = risk_summary["异常类型"].reindex(range(dashboard_rows))
         dashboard["风险数量"] = risk_summary["风险数量"].reindex(range(dashboard_rows))
@@ -592,7 +515,22 @@ def build_adaptive_analysis_report(
         "时间趋势": trend,
         "异常数据": anomalies,
         "自适应图表看板": dashboard,
+        "语义契约": contracts_frame(compiled.metric_contracts),
+        "问题与证据": questions_frame(compiled.question_evidence),
     }
+    # Preserve all fact domains for drill-down; never aggregate this union.
+    detail_parts = []
+    for index in compiled.fact_indices:
+        detail = valid_frames[index].copy(deep=True)
+        source_column, row_column = "审计_源表", "审计_记录位置"
+        while source_column in detail:
+            source_column = "_" + source_column
+        while row_column in detail:
+            row_column = "_" + row_column
+        detail.insert(0, row_column, range(1, len(detail) + 1))
+        detail.insert(0, source_column, valid_names[index])
+        detail_parts.append(detail)
+    outputs["事实域明细"] = pd.concat(detail_parts, ignore_index=True, sort=False) if detail_parts else pd.DataFrame(columns=["审计_源表", "审计_记录位置"])
     for output in outputs.values():
         output.attrs["toolbox_report_kind"] = "adaptive_analysis_report"
     report = {
@@ -605,7 +543,9 @@ def build_adaptive_analysis_report(
         "metric_count": len(compiled.fact_metrics), "dimension_count": len(compiled.fact_dimensions), "date_count": len(compiled.fact_dates),
         "fact_count": len(compiled.fact_indices), "fact_tables": list(compiled.fact_tables),
         "relation_count": len(relation_frame), "anomaly_count": len(anomalies),
-        "sheet_count": len(outputs), "chart_count": len(compiled.charts),
+        "sheet_count": len(outputs),
+        "chart_count": int(dashboard["排名分类"].notna().any()) + int("月份" in dashboard and bool(trend_metrics)) + int("结构分类" in dashboard),
+        "planned_chart_count": len(compiled.charts),
     }
     return AdaptiveReportResult(outputs=outputs, report=report)
 

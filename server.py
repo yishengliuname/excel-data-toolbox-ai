@@ -88,7 +88,7 @@ if __package__:
         fallback_power_bi_brief,
         publish_bundle_if_configured,
     )
-    from .delivery_qa import acceptance_frame, verify_delivery, write_acceptance_json
+    from .delivery_qa import acceptance_frame, export_verified, verify_delivery, write_acceptance_json
     from .secure_secrets import SecureSecretStore, SecretStoreError
     from .task_store import TaskRepository
     from .workbook_fidelity import preserve_workbook_export, workbook_feature_inventory
@@ -104,6 +104,7 @@ if __package__:
     from .inventory_report import can_build_inventory_report
     from .hr_report import can_build_hr_report
     from .adaptive_report import can_build_adaptive_report
+    from .customer_order_analysis import can_build_customer_order_analysis, verify_customer_order_workbook
     from .selection_report import can_build_selection_report, explicit_selection_count, parse_selection_count
     from .enterprise_report import can_build_enterprise_diagnosis_report
     from .sales_report import infer_sales_report_columns
@@ -175,7 +176,7 @@ else:  # Supports: python server.py
         fallback_power_bi_brief,
         publish_bundle_if_configured,
     )
-    from excel_data_toolbox.delivery_qa import acceptance_frame, verify_delivery, write_acceptance_json
+    from excel_data_toolbox.delivery_qa import acceptance_frame, export_verified, verify_delivery, write_acceptance_json
     from excel_data_toolbox.secure_secrets import SecureSecretStore, SecretStoreError
     from excel_data_toolbox.task_store import TaskRepository
     from excel_data_toolbox.workbook_fidelity import preserve_workbook_export, workbook_feature_inventory
@@ -191,6 +192,10 @@ else:  # Supports: python server.py
     from excel_data_toolbox.inventory_report import can_build_inventory_report
     from excel_data_toolbox.hr_report import can_build_hr_report
     from excel_data_toolbox.adaptive_report import can_build_adaptive_report
+    from excel_data_toolbox.customer_order_analysis import (
+        can_build_customer_order_analysis,
+        verify_customer_order_workbook,
+    )
     from excel_data_toolbox.selection_report import (
         can_build_selection_report,
         explicit_selection_count,
@@ -348,6 +353,7 @@ def _specific_report_filename(operation: str, file_names: list[str] | tuple[str,
     descriptors = {
         "enterprise_diagnosis_report": "经营诊断报告",
         "adaptive_analysis_report": "自适应经营分析报告",
+        "customer_order_analysis": "订单经营分析报告",
         "selection_recommendation_report": "结构化评选报告",
         "hr_management_report": "人效经营分析报告",
         "inventory_management_report": "库存经营分析报告",
@@ -362,6 +368,7 @@ def _specific_report_filename(operation: str, file_names: list[str] | tuple[str,
         legacy = {
             "enterprise_diagnosis_report": "企业集团经营诊断报告.xlsx",
             "adaptive_analysis_report": "通用自适应经营分析报告.xlsx",
+            "customer_order_analysis": "客户订单经营分析报告.xlsx",
             "selection_recommendation_report": "候选对象结构化评选报告.xlsx",
             "hr_management_report": "员工考勤绩效薪资经营分析报告.xlsx",
             "inventory_management_report": "采购销售库存经营报告.xlsx",
@@ -920,6 +927,7 @@ class AppSession:
         produced: list[str],
         before_rows: int | None = None,
         after_rows: int | None = None,
+        execution_trace: Mapping[str, Any] | None = None,
     ) -> None:
         operation = {
             "name": name,
@@ -930,16 +938,18 @@ class AppSession:
             "after_rows": after_rows,
             "time": datetime.now().strftime("%H:%M:%S"),
         }
+        if execution_trace is not None:
+            # The executor supplies schema/counts/hashes only, not cell values
+            # or provider credentials. Preserve traces in the durable task.
+            operation["execution_trace"] = json.loads(json.dumps(execution_trace, ensure_ascii=False))
         self.operations.append(operation)
         self.history.append({"produced": list(produced), "operation": operation})
         self.redo_stack.clear()
         self.persist()
         try:
-            input_metadata = [
-                dataset_metadata(self.tables[table_id].name, self.tables[table_id].frame, source=f"input:{table_id}")
-                for table_id in inputs
-                if table_id in self.tables
-            ]
+            input_entries = [entry for entry in self.tables.values() if entry.id in inputs or entry.name in inputs]
+            input_metadata = [dataset_metadata(entry.name, entry.frame, source=f"input:{entry.id}")
+                              for entry in input_entries]
             output_metadata = [
                 dataset_metadata(self.tables[table_id].name, self.tables[table_id].frame, source=f"output:{table_id}")
                 for table_id in produced
@@ -1355,6 +1365,7 @@ _AI_OPERATION_LABELS: dict[str, str] = {
     "inventory_management_report": "采购销售库存经营报告",
     "hr_management_report": "员工考勤绩效薪资经营报告",
     "adaptive_analysis_report": "通用自适应经营分析报告",
+    "customer_order_analysis": "客户订单清洗与经营分析",
     "selection_recommendation_report": "候选对象结构化评选报告",
     "enterprise_diagnosis_report": "企业集团经营诊断报告",
 }
@@ -1480,6 +1491,26 @@ def _is_adaptive_analysis_report_request(prompt: str) -> bool:
     return not chart_only and ((analysis_score >= 2 and deliverable_score >= 1) or strong_phrase)
 
 
+def _is_customer_order_analysis_request(prompt: str) -> bool:
+    """Recognise a multi-table order-cleaning and operating-report request."""
+
+    folded = re.sub(r"\s+", "", str(prompt or "")).casefold()
+    order_context = sum(
+        token in folded
+        for token in ("订单", "销售流水", "销售数据", "商品编码", "sku", "退款")
+    )
+    execution_actions = sum(
+        token in folded
+        for token in ("去重", "重复数据", "统一", "标准化", "取消订单", "待支付", "异常数据", "排除")
+    )
+    business_outputs = sum(
+        token in folded
+        for token in ("毛利", "目标完成", "销售情况", "订单情况", "商品", "经营分析")
+    )
+    deliverable = any(token in folded for token in ("excel", "报表", "看板", "图表", "汇总", "明细"))
+    return order_context >= 2 and execution_actions >= 2 and business_outputs >= 2 and deliverable
+
+
 def _is_selection_recommendation_request(prompt: str) -> bool:
     """Recognise requests to choose N candidates from scored/reviewed rows."""
 
@@ -1599,6 +1630,15 @@ def _adaptive_report_sources(entries: list[TableEntry]) -> list[TableEntry] | No
     candidates = originals or entries
     frames = [entry.frame for entry in candidates]
     return candidates if can_build_adaptive_report(frames) else None
+
+
+def _customer_order_sources(entries: list[TableEntry]) -> list[TableEntry] | None:
+    """Return only this task's original tables when order roles are complete."""
+
+    originals = [entry for entry in entries if entry.original]
+    candidates = originals or entries
+    frames = [entry.frame for entry in candidates]
+    return candidates if can_build_customer_order_analysis(frames) else None
 
 
 def _selection_report_sources(entries: list[TableEntry]) -> list[TableEntry] | None:
@@ -1770,15 +1810,15 @@ def _adaptive_report_plan_payload(entries: list[TableEntry], prompt: str) -> dic
         "summary": (
             "输入范围：本次任务显式上传的全部非空原始数据表；处理动作：由通用分析编译器识别领域、表角色、粒度、"
             "标准业务概念、指标聚合语义和用户意图，再按证据动态启用核心指标、分类表现、结构、趋势、关系、质量和风险分析；"
-            "关键规则：历史输出永不作为输入，只合并字段集合一致的事实表，比例按分子分母重算，余额按期末，"
+            "关键规则：历史输出永不作为输入，各事实表保持原始粒度，不凭同字段自动合并或去重，比例按同样本分子分母重算，余额按统一期末，"
             "证据不足时列出缺口而不强行计算；"
-            "输出：管理层通用总览、主数据、数据字典、质量、关系建议、分类排名、时间趋势、异常和图表看板九表；"
+            "输出：管理层通用总览、主数据、数据字典、质量、关系建议、排名、趋势、异常、看板、语义契约、问题与证据及事实明细；"
             "人工核验边界：业务口径、关联键语义和异常处置必须由用户确认。"
         ),
-        "message": "已启用本地通用分析编译器，将按当前需求和字段证据动态生成九表 Excel 经营报告。",
+        "message": "已启用多事实分析与逐指标语义校验，将生成包含证据边界及原始明细的 Excel 报告。",
         "clarification_questions": [],
         "assumptions": [
-            "只读取本次任务的原始上传表；同构表按规范化字段集合一致判定并纵向合并，完全重复行自动删除。",
+            "只读取本次任务的原始上传表；通用分析保留原记录，合并和去重需要另行明确业务规则。",
             "数值异常采用 1.5 倍 IQR 作为通用核验线索；不会据此自动删除记录。",
         ],
         "warnings": ["领域、字段角色和表关系属于数据与需求共同驱动的推断，已披露置信度和证据缺口，不能替代业务口径确认。"],
@@ -1793,6 +1833,37 @@ def _adaptive_report_plan_payload(entries: list[TableEntry], prompt: str) -> dic
                     "user_request": prompt,
                     "top_n": 10,
                     "outlier_multiplier": 1.5,
+                },
+            }
+        ],
+    }
+
+
+def _customer_order_plan_payload(entries: list[TableEntry], prompt: str) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "status": "ready",
+        "summary": (
+            "输入范围：本次明确上传的订单明细、商品主数据、退款和目标表；"
+            "处理动作：文本标准化、去重、参考映射、业务无效分流、安全N:1关联、退款汇总与分摊、"
+            "派生指标、分组汇总和交付验收；关键规则：只有高置信参考匹配自动改值，业务无效与统计预警分开，"
+            "退款按订单内有效明细销售额比例分摊；输出：管理看板、清洗明细、门店汇总、商品分析、异常、日趋势、审计、验收和图表；"
+            "人工核验边界：未知状态、参考冲突、未匹配主数据和无法解析的业务字段不静默猜测。"
+        ),
+        "message": "已生成受约束的客户订单执行计划，预演通过后由本地确定性代码执行。",
+        "clarification_questions": [],
+        "assumptions": ["低毛利参考线默认20%；只作标记，不从有效经营数据删除。"],
+        "warnings": ["未能形成唯一安全字段/参考映射时将停止或转入人工核验。"],
+        "steps": [
+            {
+                "id": "customer_order_1",
+                "operation": "customer_order_analysis",
+                "input_ids": [entry.id for entry in entries],
+                "output_name": "客户订单经营分析",
+                "params": {
+                    "source_names": [entry.name for entry in entries],
+                    "user_request": prompt,
+                    "low_margin_threshold": 0.20,
                 },
             }
         ],
@@ -4282,6 +4353,56 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             "privacy": "候选标识、得分、评语、排名、风险与入选建议的计算和 Excel 生成全部在本机完成。",
         }
 
+    def _local_customer_order_plan(
+        self,
+        entries: list[TableEntry],
+        prompt: str,
+        *,
+        model: str,
+    ) -> dict[str, Any]:
+        """Build and dry-run the deterministic customer-order workflow."""
+
+        with SESSION.lock:
+            current_entries = [SESSION.get(entry.id) for entry in entries]
+            tables = {entry.id: entry.frame.copy(deep=True) for entry in current_entries}
+            signatures = tuple(_ai_table_signature(entry) for entry in current_entries)
+            task_id = SESSION.task_id
+        catalog = build_table_catalog(tables, display_names={entry.id: entry.name for entry in current_entries})
+        try:
+            plan = validate_plan(_customer_order_plan_payload(current_entries, prompt), catalog)
+            preview = preview_plan(plan, tables)
+            dry_run_result = execute_plan(plan, tables, dry_run=True)
+        except (PlanValidationError, AgentExecutionError, TypeError, ValueError) as exc:
+            raise ApiError(f"客户订单执行计划未通过本地安全校验：{exc}", 422) from None
+        with SESSION.lock:
+            if SESSION.task_id != task_id:
+                raise ApiError("规划期间任务已被清空或切换，请重新生成计划", 409)
+            refreshed = [SESSION.get(entry.id) for entry in current_entries]
+            if tuple(_ai_table_signature(entry) for entry in refreshed) != signatures:
+                raise ApiError("规划期间数据发生变化，请重新生成计划", 409)
+            token = SESSION.issue_ai_plan(
+                table_ids=[entry.id for entry in current_entries],
+                table_signatures=signatures,
+                plan=plan,
+                model=model,
+            )
+        return {
+            "status": "ready",
+            "normalized_request": plan.summary,
+            "plan": plan.to_dict(),
+            "preview": preview.to_dict(),
+            "dry_run": dry_run_result.to_dict(),
+            "warnings": list(plan.warnings),
+            "plan_token": token,
+            "expires_in_seconds": AI_PLAN_TTL_SECONDS,
+            "auto_execute": True,
+            "data_scope": [
+                {"id": entry.id, "name": entry.name, "rows": len(entry.frame), "columns": entry.frame.shape[1]}
+                for entry in current_entries
+            ],
+            "privacy": "需求理解与白名单规划分离；清洗、关联、计算、审计和验收全部在本机确定性执行。",
+        }
+
     def _local_adaptive_analysis_plan(
         self,
         entries: list[TableEntry],
@@ -4329,7 +4450,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                 {"id": entry.id, "name": entry.name, "rows": len(entry.frame), "columns": entry.frame.shape[1]}
                 for entry in current_entries
             ],
-            "privacy": "字段角色识别、多事实域语义建模、同构合并、关系覆盖率、指标分析、异常检测和 Excel 生成全部在本机完成。",
+            "privacy": "字段识别、事实域语义契约、关系覆盖率、独立指标计算、异常检测和 Excel 验收全部在本机完成。",
         }
 
     def _ai_chart_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -4456,6 +4577,14 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                         include_charts=include_selection_charts,
                     ),
                     "结构化语义识别为候选评选，已映射数量、评分字段、评语、排名和风险复核流程",
+                )
+
+        if _is_customer_order_analysis_request(prompt):
+            sources = _customer_order_sources(entries)
+            if sources is not None:
+                return response(
+                    self._local_customer_order_plan(sources, prompt, model=model),
+                    "已映射为订单清洗、参考标准化、业务排除、安全关联、退款分摊、经营指标、审计和交付验收流程",
                 )
 
         if _is_enterprise_diagnosis_request(prompt):
@@ -4607,6 +4736,22 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         # firewall or network is unavailable.
         config = _project_ai_config()
         model = str(config.get("model") or "deepseek-v4-flash")
+        if mode_hint is None and payload.get("current_chart_spec") is None and _is_customer_order_analysis_request(prompt):
+            customer_order_sources = _customer_order_sources(entries)
+            if customer_order_sources is not None:
+                result = self._local_customer_order_plan(customer_order_sources, prompt, model=model)
+                return {
+                    "mode": "data",
+                    "route": {
+                        "intent": "data",
+                        "normalized_request": prompt,
+                        "data_request": prompt,
+                        "chart_request": "",
+                        "engineering_category": None,
+                        "reason": "已识别为真实客户订单清洗与经营分析，使用本地受约束执行计划和交付验收流程",
+                    },
+                    **result,
+                }
         if mode_hint is None and payload.get("current_chart_spec") is None and _is_enterprise_diagnosis_request(prompt):
             enterprise_sources = _enterprise_diagnosis_sources(entries)
             if enterprise_sources is not None:
@@ -4944,80 +5089,9 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         if any(len(frame) > MAX_ROWS_PER_TABLE for _, frame in generated):
             raise ApiError("AI 计划某张结果表超过 300,000 行安全上限，请拆分任务", 422)
 
-        produced: list[str] = []
-        output_tables: list[dict[str, Any]] = []
-        created_review_ids: list[str] = []
-        with SESSION.lock:
-            if SESSION.task_id != ticket.task_id:
-                raise ApiError("执行期间任务已被清空，结果没有写入", 409)
-            current_entries = [SESSION.get(table_id) for table_id in ticket.table_ids]
-            current_signatures = tuple(_ai_table_signature(entry) for entry in current_entries)
-            if current_signatures != ticket.table_signatures:
-                raise ApiError("执行期间数据表范围发生变化，结果没有写入", 409)
-            previous_active = SESSION.active_table
-            previous_warning_count = len(SESSION.import_warnings)
-            try:
-                for output_name, frame in generated:
-                    table_id = SESSION.add_table(
-                        output_name,
-                        frame,
-                        source=f"AI 一句话执行（{ticket.model}）",
-                    )
-                    produced.append(table_id)
-                    stored = SESSION.tables[table_id]
-                    output_tables.append(
-                        {
-                            "id": table_id,
-                            "name": stored.name,
-                            "rows": len(stored.frame),
-                            "columns": stored.frame.shape[1],
-                        }
-                    )
-                    category = _ai_review_category(output_name)
-                    if category and not stored.frame.empty:
-                        review_items: list[dict[str, Any]] = []
-                        evidence_columns = list(stored.frame.columns[:8])
-                        for position in range(min(100, len(stored.frame))):
-                            row = stored.frame.iloc[position]
-                            review_items.append(
-                                {
-                                    "title": f"{stored.name} · 第 {position + 1} 条",
-                                    "detail": "AI 计划已识别此项；请结合业务凭证人工确认",
-                                    "record_key": f"结果行 {position + 1}",
-                                    "evidence": {
-                                        str(column): _json_value(row.iloc[index])
-                                        for index, column in enumerate(evidence_columns)
-                                    },
-                                }
-                            )
-                        created_review_ids.extend(
-                            SESSION.add_review_items(
-                                category,
-                                "AI 一句话执行",
-                                review_items,
-                                table_id=table_id,
-                                limit=100,
-                            )
-                        )
-                SESSION.record(
-                    "AI 一句话执行",
-                    f"已人工确认；模型 {ticket.model}；白名单计划 {len(ticket.plan.steps)} 步；生成 {len(produced)} 张结果表",
-                    inputs=input_names,
-                    produced=produced,
-                    before_rows=sum(len(frame) for frame in tables.values()),
-                    after_rows=sum(len(frame) for _, frame in generated),
-                )
-            except Exception:
-                for table_id in produced:
-                    SESSION.tables.pop(table_id, None)
-                for review_id in created_review_ids:
-                    SESSION.review_items.pop(review_id, None)
-                del SESSION.import_warnings[previous_warning_count:]
-                SESSION.active_table = previous_active
-                raise
-            review_counts = SESSION.review_payload()["counts"]
 
         management_report_download_url: str | None = None
+        management_report_destination: Path | None = None
         sales_operation = next(
             (
                 step.operation
@@ -5029,6 +5103,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                     "inventory_management_report",
                     "hr_management_report",
                     "adaptive_analysis_report",
+                    "customer_order_analysis",
                     "selection_recommendation_report",
                     "enterprise_diagnosis_report",
                 }
@@ -5048,16 +5123,21 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                     expected_names = tuple(name for name in expected_names if name != "数据源确认")
                 destination_name = _specific_report_filename(sales_operation, task_file_names)
             elif sales_operation == "adaptive_analysis_report":
+                expected_names = tuple(name for name, _ in generated if name != "primary")
+                destination_name = _specific_report_filename(sales_operation, task_file_names)
+            elif sales_operation == "customer_order_analysis":
                 expected_names = (
-                    "管理层通用总览",
-                    "主数据分析",
-                    "数据字典",
-                    "数据质量",
-                    "表关系建议",
-                    "分类排名",
-                    "时间趋势",
+                    "管理看板",
+                    "门店汇总",
+                    "商品分析",
+                    "每日趋势",
+                    "清洗明细",
                     "异常数据",
-                    "自适应图表看板",
+                    "统计预警",
+                    "人工核验",
+                    "执行审计",
+                    "数据验收",
+                    "图表看板",
                 )
                 destination_name = _specific_report_filename(sales_operation, task_file_names)
             elif sales_operation == "selection_recommendation_report":
@@ -5123,11 +5203,9 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                 )
                 destination_name = _specific_report_filename(sales_operation, task_file_names)
             with SESSION.lock:
-                by_name = {
-                    SESSION.tables[table_id].name: SESSION.tables[table_id].frame.copy(deep=True)
-                    for table_id in produced
-                    if table_id in SESSION.tables
-                }
+                by_name = {name: frame.copy(deep=True) for name, frame in generated}
+                if SESSION.task_id != ticket.task_id:
+                    raise ApiError("执行期间任务已改变，报告未提交", 409)
                 missing = [name for name in expected_names if name not in by_name]
                 if missing:
                     raise ApiError("经营报告缺少交付工作表：" + "、".join(missing), 422)
@@ -5153,16 +5231,98 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                         report_tables["数据源确认"] = confirmation
                 destination = SESSION.output_dir / destination_name
             try:
-                export_tables(
-                    report_tables,
-                    destination,
-                    include_log=False,
-                    overwrite=True,
+                export_verified(
+                    report_tables, destination,
+                    writer=lambda frames, path: export_tables(frames, path, include_log=False, overwrite=True),
+                    extra_validator=(lambda path: verify_customer_order_workbook(str(path)))
+                    if sales_operation == "customer_order_analysis" else None,
                 )
+                management_report_destination = destination
             except (OSError, TypeError, ValueError) as exc:
                 raise ApiError(f"经营报告 Excel 生成失败：{exc}", 422) from None
-            with SESSION.lock:
-                management_report_download_url = SESSION.register_download(destination)
+
+        produced: list[str] = []
+        output_tables: list[dict[str, Any]] = []
+        created_review_ids: list[str] = []
+        with SESSION.lock:
+            if SESSION.task_id != ticket.task_id:
+                raise ApiError("执行期间任务已被清空，结果没有写入", 409)
+            current_entries = [SESSION.get(table_id) for table_id in ticket.table_ids]
+            current_signatures = tuple(_ai_table_signature(entry) for entry in current_entries)
+            if current_signatures != ticket.table_signatures:
+                raise ApiError("执行期间数据表范围发生变化，结果没有写入", 409)
+            previous_active = SESSION.active_table
+            previous_warning_count = len(SESSION.import_warnings)
+            previous_operation_count = len(SESSION.operations)
+            previous_history_count = len(SESSION.history)
+            previous_redo = list(SESSION.redo_stack)
+            try:
+                for output_name, frame in generated:
+                    table_id = SESSION.add_table(
+                        output_name,
+                        frame,
+                        source=f"AI 一句话执行（{ticket.model}）",
+                    )
+                    produced.append(table_id)
+                    stored = SESSION.tables[table_id]
+                    output_tables.append(
+                        {
+                            "id": table_id,
+                            "name": stored.name,
+                            "rows": len(stored.frame),
+                            "columns": stored.frame.shape[1],
+                        }
+                    )
+                    category = _ai_review_category(output_name)
+                    if category and not stored.frame.empty:
+                        review_items: list[dict[str, Any]] = []
+                        evidence_columns = list(stored.frame.columns[:8])
+                        for position in range(min(100, len(stored.frame))):
+                            row = stored.frame.iloc[position]
+                            review_items.append(
+                                {
+                                    "title": f"{stored.name} · 第 {position + 1} 条",
+                                    "detail": "AI 计划已识别此项；请结合业务凭证人工确认",
+                                    "record_key": f"结果行 {position + 1}",
+                                    "evidence": {
+                                        str(column): _json_value(row.iloc[index])
+                                        for index, column in enumerate(evidence_columns)
+                                    },
+                                }
+                            )
+                        created_review_ids.extend(
+                            SESSION.add_review_items(
+                                category,
+                                "AI 一句话执行",
+                                review_items,
+                                table_id=table_id,
+                                limit=100,
+                            )
+                        )
+                SESSION.record(
+                    "AI 一句话执行",
+                    f"已人工确认；模型 {ticket.model}；白名单计划 {len(ticket.plan.steps)} 步；生成 {len(produced)} 张结果表",
+                    inputs=input_names,
+                    produced=produced,
+                    before_rows=sum(len(frame) for frame in tables.values()),
+                    after_rows=sum(len(frame) for _, frame in generated),
+                    execution_trace={step_id: dict(report.get("execution", {}))
+                                     for step_id, report in result.to_dict()["reports"].items()},
+                )
+            except Exception:
+                for table_id in produced:
+                    SESSION.tables.pop(table_id, None)
+                for review_id in created_review_ids:
+                    SESSION.review_items.pop(review_id, None)
+                del SESSION.import_warnings[previous_warning_count:]
+                SESSION.active_table = previous_active
+                del SESSION.operations[previous_operation_count:]
+                del SESSION.history[previous_history_count:]
+                SESSION.redo_stack = previous_redo
+                raise
+            review_counts = SESSION.review_payload()["counts"]
+            if management_report_destination is not None:
+                management_report_download_url = SESSION.register_download(management_report_destination)
 
         result_metadata = result.to_dict()
         reports = result_metadata.get("reports", {})
@@ -6499,11 +6659,17 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                     inferred = entry.name.rsplit("__", 1)[-1]
                     if inferred in existing_sheets:
                         replace_sheets[entry.name] = inferred
-                preserve_workbook_export(source_workbook, destination, tables, replace_sheets=replace_sheets)
                 qa_tables = {replace_sheets.get(name, name): frame for name, frame in tables.items()}
+                acceptance = export_verified(
+                    qa_tables, destination, allow_extra_tables=True,
+                    writer=lambda _, path: preserve_workbook_export(source_workbook, path, tables,
+                                                                     replace_sheets=replace_sheets),
+                )
             else:
-                export_tables(tables, destination, include_log=False, overwrite=True)
-            acceptance = verify_delivery(destination, qa_tables, allow_extra_tables=True)
+                acceptance = export_verified(
+                    tables, destination,
+                    writer=lambda frames, path: export_tables(frames, path, include_log=False, overwrite=True),
+                )
             acceptance_path = destination.with_name(f"{destination.stem}_自动验收.json")
             write_acceptance_json(acceptance, acceptance_path)
             if acceptance.status != "passed":

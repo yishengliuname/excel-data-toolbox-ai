@@ -552,6 +552,8 @@ def join_tables(
     how: Literal["left", "right", "inner", "outer", "cross"] = "left",
     suffixes: tuple[str, str] = ("_左", "_右"),
     validate: str | None = None,
+    allow_many_to_many: bool = False,
+    max_output_rows: int = 300_000,
     left_name: str = "左表",
     right_name: str = "右表",
     output_name: str = "键连接结果",
@@ -563,6 +565,41 @@ def join_tables(
     _require_dataframe(right, "right")
     if how != "cross" and on is None and (left_on is None or right_on is None):
         raise ValueError("非 cross 连接必须提供 on，或同时提供 left_on 和 right_on")
+    if not isinstance(allow_many_to_many, bool):
+        raise TypeError("allow_many_to_many 必须是布尔值")
+    if isinstance(max_output_rows, bool) or not isinstance(max_output_rows, int) or not 1 <= max_output_rows <= 300_000:
+        raise ValueError("max_output_rows 必须为 1..300000")
+    if how == "cross":
+        estimated_rows = len(left) * len(right)
+        if not allow_many_to_many:
+            raise ValueError("cross 连接需明确 allow_many_to_many=True 和输出行数上限")
+    else:
+        left_keys = _normalise_columns(on if on is not None else left_on, argument="left keys")
+        right_keys = _normalise_columns(on if on is not None else right_on, argument="right keys")
+        _validate_columns(left, left_keys, argument="left keys")
+        _validate_columns(right, right_keys, argument="right keys")
+        if len(left_keys) != len(right_keys):
+            raise ValueError("连接键数量不一致")
+        for frame, keys in ((left, left_keys), (right, right_keys)):
+            values = frame[keys]
+            if values.isna().any(axis=None) or values.map(lambda x: isinstance(x, str) and not x.strip()).any(axis=None):
+                raise ValueError("连接键缺失：请先分流人工核验，禁止空键相互匹配")
+        counts = []
+        for frame, keys, label in ((left, left_keys, "left_count"), (right, right_keys, "right_count")):
+            part = frame.groupby(keys, dropna=False, observed=True).size().reset_index(name=label)
+            part.columns = [*(f"key_{i}" for i in range(len(keys))), label]
+            counts.append(part)
+        cardinality = counts[0].merge(counts[1], how="outer", on=list(counts[0].columns[:-1]))
+        lc, rc = cardinality["left_count"].fillna(0), cardinality["right_count"].fillna(0)
+        if ((lc > 1) & (rc > 1)).any() and not allow_many_to_many:
+            raise ValueError("多对多连接会重复计算：请先按事实粒度汇总或显式批准受限连接")
+        estimated_rows = int((lc * rc).sum())
+        if how in {"left", "outer"}:
+            estimated_rows += int(lc[rc == 0].sum())
+        if how in {"right", "outer"}:
+            estimated_rows += int(rc[lc == 0].sum())
+    if estimated_rows > max_output_rows:
+        raise ValueError(f"连接预计生成 {estimated_rows} 行，超过 {max_output_rows} 行上限")
     result = pd.merge(
         left.copy(deep=True),
         right.copy(deep=True),
@@ -585,6 +622,8 @@ def join_tables(
             "left_on": left_on,
             "right_on": right_on,
             "row_count": len(result),
+            "estimated_rows": estimated_rows,
+            "allow_many_to_many": allow_many_to_many,
         },
     )
     return result

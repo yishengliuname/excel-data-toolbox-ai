@@ -2114,7 +2114,7 @@ async function unifiedHandleResponse(payload){
       const hr=operations.includes("hr_management_report");
       const adaptive=operations.includes("adaptive_analysis_report");
       const enterprise=operations.includes("enterprise_diagnosis_report");
-      $("assistantMessage").textContent=enterprise?"已识别为企业集团经营诊断，正在本机勾稽财务、客户、人员、成本与库存，生成十张专业工作表…":adaptive?"专用模块未完全匹配，正在本机识别主表、字段角色、表关系、指标、趋势和异常并生成九张工作表…":hr?"已识别为员工考勤绩效薪资经营报告，正在本机整合、评分、预警并生成十张工作表…":inventory?"已识别为采购销售库存联动报告，正在本机核算库存、判断补货与积压并生成九张工作表…":quarterly?"已识别为多表季度销售报告，正在本机自动清洗、去重、排除无效订单并生成八张工作表…":"已识别为标准销售经营报告，正在本机自动计算并生成五张工作表…";
+      $("assistantMessage").textContent=enterprise?"已识别为企业集团经营诊断，正在本机勾稽财务、客户、人员、成本与库存，生成十张专业工作表…":adaptive?"正在逐表识别事实域、校验指标口径并生成分析、原始明细和核验表；不确定项会单独说明…":hr?"已识别为员工考勤绩效薪资经营报告，正在本机整合、评分、预警并生成十张工作表…":inventory?"已识别为采购销售库存联动报告，正在本机核算库存、判断补货与积压并生成九张工作表…":quarterly?"已识别为多表季度销售报告，正在本机自动清洗、去重、排除无效订单并生成八张工作表…":"已识别为标准销售经营报告，正在本机自动计算并生成五张工作表…";
       await unifiedExecutePlan();
     }
   }

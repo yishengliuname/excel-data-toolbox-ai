@@ -46,9 +46,11 @@ class AnalysisCompilerTests(unittest.TestCase):
             user_request="判断哪些商品缺货或积压，并分析采购、销售、库存情况",
         )
         self.assertEqual(plan.domain_id, "inventory")
-        self.assertIn("inventory", plan.capabilities)
+        # Undated stock balances may identify the domain, but cannot establish
+        # an ending snapshot or authorise replenishment conclusions.
+        self.assertNotIn("inventory", plan.capabilities)
         self.assertIn("库存", plan.metrics[0])
-        self.assertFalse(any("库存判断" in item for item in plan.missing_evidence))
+        self.assertTrue(any("库存判断" in item for item in plan.missing_evidence))
 
     def test_workforce_structure_is_detected_without_request_specific_python(self) -> None:
         frame = pd.DataFrame({

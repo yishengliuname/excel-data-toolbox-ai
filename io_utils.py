@@ -16,6 +16,7 @@ import zipfile
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.chart import BarChart, DoughnutChart, LineChart, Reference
+from openpyxl.chart.data_source import AxDataSource, StrRef
 from openpyxl.chart.label import DataLabelList
 from openpyxl.chart.marker import DataPoint
 from openpyxl.chart.series import SeriesLabel
@@ -630,6 +631,7 @@ _HR_TAB_COLOURS = {
 }
 
 _ADAPTIVE_REPORT_SHEETS = (
+    "语义契约", "问题与证据", "事实域明细",
     "管理层通用总览",
     "主数据分析",
     "数据字典",
@@ -642,11 +644,14 @@ _ADAPTIVE_REPORT_SHEETS = (
 )
 
 _ADAPTIVE_REPORT_TITLES = {
+    "语义契约": ("指标语义契约与计算边界", "来源、单位、时间、样本范围与聚合方式｜推断不代表已确认业务政策"),
+    "问题与证据": ("需求问题与证据覆盖", "逐主题标记可回答、部分支持和不可回答｜证据不足不生成确定性建议"),
+    "事实域明细": ("全部事实域原始明细", "原记录与源表、记录位置保留｜异构数据仅供追溯，禁止直接对整表求和"),
     "管理层通用总览": (
         "AI 通用经营分析驾驶舱",
         "需求意图、领域语义、指标口径、证据缺口和图表均由当前数据动态编译",
     ),
-    "主数据分析": ("自适应主数据分析", "同构分表自动合并并删除完全重复记录｜保留来源数据表便于追溯"),
+    "主数据分析": ("自适应主数据分析", "仅为展示锚点｜原记录保留，不按同字段自动合并，不直接删除疑似重复"),
     "数据字典": ("字段角色与数据字典", "逐字段展示类型、非空、唯一性、示例值与推断角色"),
     "数据质量": ("数据质量概览", "缺失、重复、行列规模和质量状态按表展示"),
     "表关系建议": ("候选表关系建议", "依据同名字段、值覆盖率和键唯一性推断｜正式连接前必须核验业务含义"),
@@ -657,6 +662,7 @@ _ADAPTIVE_REPORT_TITLES = {
 }
 
 _ADAPTIVE_TAB_COLOURS = {
+    "语义契约": "6B7C8F", "问题与证据": "B42318", "事实域明细": "2F75B5",
     "管理层通用总览": "17324D",
     "主数据分析": "2F75B5",
     "数据字典": "6B5FD2",
@@ -666,6 +672,48 @@ _ADAPTIVE_TAB_COLOURS = {
     "时间趋势": "6B5FD2",
     "异常数据": "E26A45",
     "自适应图表看板": "0B6B46",
+}
+
+_ORDER_REPORT_SHEETS = (
+    "管理看板",
+    "门店汇总",
+    "商品分析",
+    "每日趋势",
+    "清洗明细",
+    "异常数据",
+    "统计预警",
+    "人工核验",
+    "执行审计",
+    "数据验收",
+    "图表看板",
+)
+
+_ORDER_REPORT_TITLES = {
+    "管理看板": ("订单经营管理看板", "净销售额、毛利、订单和退款按已验证的清洗明细计算"),
+    "门店汇总": ("门店经营汇总", "销售、退款、目标、毛利、订单和客单价统一口径"),
+    "商品分析": ("商品销售与毛利", "商品名称、类目和成本以商品主数据为准"),
+    "每日趋势": ("每日经营趋势", "按真实交易日期汇总，不用单一月份标签代替日趋势"),
+    "清洗明细": ("有效经营明细", "已去重、标准化、关联主数据、分摊退款并计算毛利"),
+    "异常数据": ("业务排除明细", "保留原始记录和具体排除原因，不计入正常经营指标"),
+    "统计预警": ("统计预警线索", "只提示IQR异常线索，默认不删除业务有效记录"),
+    "人工核验": ("人工核验清单", "无法安全映射、无法归属或口径不确定的记录"),
+    "执行审计": ("确定性执行审计", "记录每个操作、前后行数、影响行数和处理口径"),
+    "数据验收": ("交付前数据验收", "行数、主数据、门店别名和金额勾稽通过后才允许交付"),
+    "图表看板": ("订单经营可视化", "日销售与毛利趋势、门店表现和商品贡献｜原生Excel图表可继续编辑"),
+}
+
+_ORDER_TAB_COLOURS = {
+    "管理看板": "17324D",
+    "门店汇总": "2F75B5",
+    "商品分析": "00A389",
+    "每日趋势": "6B5FD2",
+    "清洗明细": "2F75B5",
+    "异常数据": "E26A45",
+    "统计预警": "D99614",
+    "人工核验": "B42318",
+    "执行审计": "6B7C8F",
+    "数据验收": "00A389",
+    "图表看板": "0B6B46",
 }
 
 _SELECTION_REPORT_SHEETS = (
@@ -2068,15 +2116,18 @@ def _add_adaptive_management_charts(worksheet: Any, *, header_row: int) -> None:
         return
     headers = {str(cell.value or ""): cell.column for cell in worksheet[header_row]}
 
+    def label(name: str) -> str:
+        return str(worksheet.cell(header_row + 1, headers[name]).value or "") if name in headers else ""
+
     if {"排名分类", "排名指标值"}.issubset(headers):
         end = _last_data_row(worksheet, headers["排名分类"], header_row=header_row)
         if end > header_row:
             chart = BarChart()
             chart.type = "bar"
-            chart.title = "首要分类指标排名"
+            chart.title = f"{label('排名来源')}：{label('排名口径')}排名" if label("排名来源") else "首要分类指标排名"
             chart.x_axis.title = "指标值"
             chart.y_axis.title = "分类"
-            chart.height = 7.2
+            chart.height = 8.0
             chart.width = 13.8
             chart.style = 2
             chart.legend = None
@@ -2095,7 +2146,7 @@ def _add_adaptive_management_charts(worksheet: Any, *, header_row: int) -> None:
         end = _last_data_row(worksheet, headers["月份"], header_row=header_row)
         if end > header_row:
             chart = LineChart()
-            chart.title = "核心指标时间趋势"
+            chart.title = f"{label('趋势来源')}：时间趋势" if label("趋势来源") else "核心指标时间趋势"
             chart.y_axis.title = "指标值"
             chart.x_axis.title = "月份"
             chart.height = 7.2
@@ -2117,7 +2168,7 @@ def _add_adaptive_management_charts(worksheet: Any, *, header_row: int) -> None:
         end = _last_data_row(worksheet, headers["结构分类"], header_row=header_row)
         if end > header_row:
             chart = DoughnutChart()
-            chart.title = "首要指标结构占比"
+            chart.title = f"{label('排名来源')}：{label('排名口径')}结构" if label("排名来源") else "首要指标结构占比"
             chart.height = 7.2
             chart.width = 13.8
             chart.style = 10
@@ -2135,16 +2186,226 @@ def _add_adaptive_management_charts(worksheet: Any, *, header_row: int) -> None:
             chart.dataLabels.showLeaderLines = True
             worksheet.add_chart(chart, "A21")
 
+
+def _order_title_band(worksheet: Any, *, end_column: int) -> None:
+    title, subtitle = _ORDER_REPORT_TITLES[worksheet.title]
+    worksheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=end_column)
+    worksheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=end_column)
+    worksheet.cell(1, 1).value = title
+    worksheet.cell(2, 1).value = subtitle
+    for column in range(1, end_column + 1):
+        worksheet.cell(1, column).fill = PatternFill("solid", fgColor="17324D")
+        worksheet.cell(2, column).fill = PatternFill("solid", fgColor="EAF1F7")
+    worksheet.cell(1, 1).font = Font(name="微软雅黑", size=18, bold=True, color="FFFFFF")
+    worksheet.cell(2, 1).font = Font(name="微软雅黑", size=10, color="4B6275")
+    worksheet.cell(1, 1).alignment = Alignment(horizontal="left", vertical="center")
+    worksheet.cell(2, 1).alignment = Alignment(horizontal="left", vertical="center")
+    worksheet.row_dimensions[1].height = 36
+    worksheet.row_dimensions[2].height = 24
+    worksheet.row_dimensions[3].height = 9
+
+
+def _style_order_management_sheet(worksheet: Any, *, header_row: int) -> None:
+    worksheet.sheet_view.showGridLines = False
+    worksheet.sheet_properties.tabColor = _ORDER_TAB_COLOURS[worksheet.title]
+    worksheet.sheet_view.zoomScale = 88
+    worksheet.print_title_rows = f"1:{header_row}"
+    _style_report_data_grid(worksheet, header_row=header_row)
+    _order_title_band(worksheet, end_column=max(16, worksheet.max_column))
+    headers = {str(cell.value or ""): cell.column for cell in worksheet[header_row]}
+
+    if worksheet.title == "管理看板":
+        _set_report_widths(worksheet, {"A": 24, "B": 20, "C": 10, "D": 52})
+        metrics = {
+            str(worksheet.cell(row=row, column=1).value or ""): worksheet.cell(row=row, column=2).value
+            for row in range(header_row + 1, worksheet.max_row + 1)
+        }
+        for row in range(header_row + 1, worksheet.max_row + 1):
+            worksheet.cell(row, 1).fill = _SUMMARY_KEY_FILL
+            worksheet.cell(row, 1).font = Font(name="微软雅黑", size=10, bold=True, color="0B5D3B")
+            unit = str(worksheet.cell(row, 3).value or "")
+            worksheet.cell(row, 2).number_format = (
+                "0.0%" if unit == "%" else '#,##0.00 "元"' if unit == "元" else "#,##0"
+            )
+        cards = (
+            ("F4:H4", "F5:H7", "净销售额", metrics.get("净销售额"), '#,##0.00 "元"', "2F75B5"),
+            ("J4:L4", "J5:L7", "毛利", metrics.get("毛利"), '#,##0.00 "元"', "00A389"),
+            ("N4:P4", "N5:P7", "毛利率", metrics.get("毛利率"), "0.0%", "6B5FD2"),
+            ("F9:H9", "F10:H12", "有效订单", metrics.get("有效订单数"), '0 "单"', "D99614"),
+            ("J9:L9", "J10:L12", "有效退款", metrics.get("有效退款金额"), '#,##0.00 "元"', "E26A45"),
+            ("N9:P9", "N10:P12", "排除记录", metrics.get("异常/排除记录"), '0 "行"', "6B7C8F"),
+        )
+        for label_range, value_range, label, value, number_format, colour in cards:
+            worksheet.merge_cells(label_range)
+            worksheet.merge_cells(value_range)
+            label_cell = worksheet[label_range.split(":")[0]]
+            value_cell = worksheet[value_range.split(":")[0]]
+            label_cell.value = label
+            label_cell.fill = PatternFill("solid", fgColor=colour)
+            label_cell.font = Font(name="微软雅黑", size=10, bold=True, color="FFFFFF")
+            label_cell.alignment = Alignment(horizontal="center", vertical="center")
+            value_cell.value = value if value not in (None, "") else "—"
+            value_cell.fill = PatternFill("solid", fgColor="F5F8FB")
+            value_cell.font = Font(name="微软雅黑", size=17, bold=True, color="17324D")
+            value_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            value_cell.number_format = number_format
+        for column in ("F", "G", "H", "J", "K", "L", "N", "O", "P"):
+            worksheet.column_dimensions[column].width = 10
+        return
+
+    if worksheet.title == "图表看板":
+        worksheet.freeze_panes = None
+        worksheet.sheet_view.selection = [Selection(activeCell="A1", sqref="A1")]
+        worksheet.sheet_view.zoomScale = 78
+        for column in range(1, max(20, worksheet.max_column + 1)):
+            worksheet.column_dimensions[get_column_letter(column)].width = 11
+        for start, end, title in ((1, 9, "Top 10 商品净销售额（元）"), (11, 19, "风险与异常线索分布")):
+            worksheet.merge_cells(start_row=20, start_column=start, end_row=20, end_column=end)
+            cell = worksheet.cell(20, start)
+            cell.value = title
+            cell.fill = PatternFill("solid", fgColor="17324D")
+            cell.font = Font(name="微软雅黑", size=11, bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        worksheet.row_dimensions[20].height = 24
+        return
+
+    for index, header in enumerate(headers, start=1):
+        width = 14
+        if any(token in header for token in ("原因", "说明", "证据", "核验")):
+            width = 38
+        elif any(token in header for token in ("商品名称", "下单时间", "执行操作")):
+            width = 20
+        elif any(token in header for token in ("订单号", "商品编码")):
+            width = 16
+        worksheet.column_dimensions[get_column_letter(index)].width = width
+    for header, column in headers.items():
+        if "率" in header or "完成" in header:
+            number_format = "0.0%"
+        elif any(token in header for token in ("销售额", "金额", "成本", "毛利", "单价", "目标", "客单价")):
+            number_format = "#,##0.00;[Red](#,##0.00);-"
+        elif any(token in header for token in ("日期", "时间")):
+            number_format = "yyyy-mm-dd"
+        else:
+            continue
+        for row in range(header_row + 1, worksheet.max_row + 1):
+            worksheet.cell(row, column).number_format = number_format
+    if worksheet.title in {"异常数据", "统计预警", "人工核验", "执行审计", "数据验收"}:
+        for row in range(header_row + 1, worksheet.max_row + 1):
+            worksheet.row_dimensions[row].height = 32
+            for cell in worksheet[row]:
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+                if worksheet.title == "异常数据" and cell.fill.fill_type is None:
+                    cell.fill = PatternFill("solid", fgColor="FFF1F0")
+
+
+def _add_order_management_charts(worksheet: Any, *, header_row: int) -> None:
+    if worksheet.title != "图表看板":
+        return
+    headers = {str(cell.value or ""): cell.column for cell in worksheet[header_row]}
+
+    if {"日期", "每日净销售额", "每日毛利"}.issubset(headers):
+        end = _last_data_row(worksheet, headers["日期"], header_row=header_row)
+        if end > header_row:
+            chart = LineChart()
+            chart.title = "每日净销售额与毛利（元）"
+            chart.y_axis.title = "金额（元）"
+            chart.x_axis.title = "日期"
+            chart.height = 7.2
+            chart.width = 14.2
+            chart.style = 13
+            chart.add_data(
+                Reference(
+                    worksheet,
+                    min_col=headers["每日净销售额"],
+                    max_col=headers["每日毛利"],
+                    min_row=header_row,
+                    max_row=end,
+                ),
+                titles_from_data=True,
+            )
+            chart.set_categories(Reference(worksheet, min_col=headers["日期"], min_row=header_row + 1, max_row=end))
+            chart.legend.position = "b"
+            worksheet.add_chart(chart, "A4")
+
+    if {"门店", "门店净销售额"}.issubset(headers):
+        end = _last_data_row(worksheet, headers["门店"], header_row=header_row)
+        if end > header_row:
+            chart = BarChart()
+            chart.type = "col"
+            chart.title = "门店净销售额（元）"
+            chart.y_axis.title = "金额（元）"
+            chart.x_axis.title = None
+            chart.height = 8.0
+            chart.width = 12.8
+            chart.style = 10
+            chart.legend = None
+            chart.add_data(
+                Reference(worksheet, min_col=headers["门店净销售额"], min_row=header_row, max_row=end),
+                titles_from_data=True,
+            )
+            chart.set_categories(Reference(worksheet, min_col=headers["门店"], min_row=header_row + 1, max_row=end))
+            if chart.series:
+                category_column = get_column_letter(headers["门店"])
+                chart.series[0].cat = AxDataSource(
+                    strRef=StrRef(
+                        f"'{worksheet.title}'!${category_column}${header_row + 1}:${category_column}${end}"
+                    )
+                )
+                chart.series[0].graphicalProperties.solidFill = "00A389"
+                chart.series[0].graphicalProperties.line.solidFill = "00A389"
+            chart.dataLabels = DataLabelList()
+            chart.dataLabels.showLegendKey = False
+            chart.dataLabels.showSerName = False
+            chart.dataLabels.showCatName = True
+            chart.dataLabels.showVal = True
+            chart.dataLabels.dLblPos = "inEnd"
+            chart.dataLabels.separator = "\n"
+            worksheet.add_chart(chart, "K4")
+
+    if {"商品", "商品净销售额"}.issubset(headers):
+        end = _last_data_row(worksheet, headers["商品"], header_row=header_row)
+        if end > header_row:
+            chart = BarChart()
+            chart.type = "bar"
+            chart.title = None
+            chart.x_axis.title = None
+            chart.height = 8.0
+            chart.width = 18.5
+            chart.style = 10
+            chart.legend = None
+            chart.add_data(
+                Reference(worksheet, min_col=headers["商品净销售额"], min_row=header_row, max_row=end),
+                titles_from_data=True,
+            )
+            chart.set_categories(Reference(worksheet, min_col=headers["商品"], min_row=header_row + 1, max_row=end))
+            if chart.series:
+                category_column = get_column_letter(headers["商品"])
+                chart.series[0].cat = AxDataSource(
+                    strRef=StrRef(
+                        f"'{worksheet.title}'!${category_column}${header_row + 1}:${category_column}${end}"
+                    )
+                )
+                chart.series[0].graphicalProperties.solidFill = "2F75B5"
+                chart.series[0].graphicalProperties.line.solidFill = "2F75B5"
+            chart.dataLabels = DataLabelList()
+            chart.dataLabels.showLegendKey = False
+            chart.dataLabels.showSerName = False
+            chart.dataLabels.showCatName = True
+            chart.dataLabels.showVal = True
+            chart.dataLabels.dLblPos = "inEnd"
+            chart.dataLabels.separator = "\n"
+            worksheet.add_chart(chart, "A21")
+
     if {"异常类型", "风险数量"}.issubset(headers):
         end = _last_data_row(worksheet, headers["异常类型"], header_row=header_row)
         if end > header_row:
             chart = BarChart()
             chart.type = "bar"
-            chart.title = "风险与异常线索分布"
-            chart.x_axis.title = "线索数量"
-            chart.y_axis.title = "异常类型"
-            chart.height = 7.2
-            chart.width = 13.8
+            chart.title = None
+            chart.x_axis.title = None
+            chart.y_axis.title = None
+            chart.height = 8.0
+            chart.width = 18.5
             chart.style = 2
             chart.legend = None
             chart.add_data(
@@ -2155,8 +2416,21 @@ def _add_adaptive_management_charts(worksheet: Any, *, header_row: int) -> None:
                 Reference(worksheet, min_col=headers["异常类型"], min_row=header_row + 1, max_row=end)
             )
             if chart.series:
+                category_column = get_column_letter(headers["异常类型"])
+                chart.series[0].cat = AxDataSource(
+                    strRef=StrRef(
+                        f"'{worksheet.title}'!${category_column}${header_row + 1}:${category_column}${end}"
+                    )
+                )
                 chart.series[0].graphicalProperties.solidFill = "E26A45"
                 chart.series[0].graphicalProperties.line.solidFill = "E26A45"
+            chart.dataLabels = DataLabelList()
+            chart.dataLabels.showLegendKey = False
+            chart.dataLabels.showSerName = False
+            chart.dataLabels.showCatName = True
+            chart.dataLabels.showVal = True
+            chart.dataLabels.dLblPos = "inEnd"
+            chart.dataLabels.separator = "\n"
             worksheet.add_chart(chart, "K21")
 
 
@@ -2975,6 +3249,7 @@ def _write_xlsx(
     expectations: list[tuple[str, int, int]] = []
     hr_report = "管理层人效总览" in tables
     adaptive_report = "管理层通用总览" in tables
+    order_report = "管理看板" in tables and "清洗明细" in tables
     selection_report = "评选管理总览" in tables
     enterprise_report = "管理层诊断总览" in tables
     temp_path = _atomic_temp_path(destination)
@@ -2993,6 +3268,7 @@ def _write_xlsx(
                     "库存图表看板",
                     "人力图表看板",
                     "自适应图表看板",
+                    "图表看板",
                     "评选图表看板",
                 }:
                     start_row = 39
@@ -3001,6 +3277,7 @@ def _write_xlsx(
                     or sheet_name in _INVENTORY_REPORT_SHEETS
                     or sheet_name in _HR_REPORT_SHEETS
                     or sheet_name in _ADAPTIVE_REPORT_SHEETS
+                    or sheet_name in _ORDER_REPORT_SHEETS
                     or sheet_name in _SELECTION_REPORT_SHEETS
                     or sheet_name in _ENTERPRISE_REPORT_SHEETS
                 ):
@@ -3021,6 +3298,7 @@ def _write_xlsx(
                         "管理层库存总览",
                         "管理层人效总览",
                         "管理层通用总览",
+                        "管理看板",
                         "评选管理总览",
                         "管理层诊断总览",
                     },
@@ -3035,6 +3313,9 @@ def _write_xlsx(
                 elif adaptive_report and sheet_name in _ADAPTIVE_REPORT_SHEETS:
                     _style_adaptive_management_sheet(worksheet, header_row=header_row)
                     _add_adaptive_management_charts(worksheet, header_row=header_row)
+                elif order_report and sheet_name in _ORDER_REPORT_SHEETS:
+                    _style_order_management_sheet(worksheet, header_row=header_row)
+                    _add_order_management_charts(worksheet, header_row=header_row)
                 elif selection_report and sheet_name in _SELECTION_REPORT_SHEETS:
                     _style_selection_management_sheet(worksheet, header_row=header_row)
                     _add_selection_management_charts(worksheet, header_row=header_row)

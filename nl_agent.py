@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 import json
 import math
+import hashlib
+from time import perf_counter
 import re
 import socket
 import ssl
@@ -51,6 +53,10 @@ from .finance import analyze_finance, finance_column_names, validate_finance_par
 from .inventory_report import build_inventory_management_report, validate_inventory_report_params
 from .hr_report import build_hr_management_report, validate_hr_report_params
 from .adaptive_report import build_adaptive_analysis_report, validate_adaptive_report_params
+from .customer_order_analysis import (
+    build_customer_order_analysis,
+    validate_customer_order_params,
+)
 from .selection_report import (
     build_selection_recommendation_report,
     validate_selection_report_params,
@@ -94,313 +100,20 @@ _LEGACY_MODEL_ALIASES: Mapping[str, str] = MappingProxyType(
     }
 )
 
-ALLOWED_AGENT_OPERATIONS: frozenset[str] = frozenset(
-    {
-        "clean",
-        "select_rename_sort",
-        "concat",
-        "join",
-        "lookup",
-        "summary",
-        "split",
-        "mask",
-        "validate",
-        "reconcile",
-        "fuzzy_cluster",
-        "fuzzy_lookup",
-        "quality",
-        "describe",
-        "correlation",
-        "outliers",
-        "trend",
-        "contribution",
-        "pivot",
-        "compare",
-        "rfm",
-        "recipe",
-        "finance",
-        "sales_management_report",
-        "quarterly_sales_report",
-        "inventory_management_report",
-        "hr_management_report",
-        "adaptive_analysis_report",
-        "selection_recommendation_report",
-        "enterprise_diagnosis_report",
-    }
+from .operation_contracts import (
+    ALLOWED_OPERATIONS as ALLOWED_AGENT_OPERATIONS,
+    INPUT_COUNTS as _INPUT_COUNTS,
+    PARAM_KEYS as _PARAM_KEYS,
+    REPORT_OPERATIONS,
 )
+from . import structured_ops
+from .delivery_qa import dataframe_fingerprint
+from .tool_registry import build_builtin_registry
 
 _STEP_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _REFERENCE = re.compile(
     r"^\$(?P<step>[A-Za-z][A-Za-z0-9_-]{0,63})(?::(?P<artifact>[A-Za-z0-9_\-\u4e00-\u9fff]{1,64}))?$"
 )
-
-_INPUT_COUNTS: Mapping[str, tuple[int, int]] = MappingProxyType(
-    {
-        "clean": (1, 1),
-        "select_rename_sort": (1, 1),
-        "concat": (2, 20),
-        "join": (2, 2),
-        "lookup": (2, 2),
-        "summary": (1, 1),
-        "split": (1, 1),
-        "mask": (1, 1),
-        "validate": (1, 1),
-        "reconcile": (2, 2),
-        "fuzzy_cluster": (1, 1),
-        "fuzzy_lookup": (2, 2),
-        "quality": (1, 1),
-        "describe": (1, 1),
-        "correlation": (1, 1),
-        "outliers": (1, 1),
-        "trend": (1, 1),
-        "contribution": (1, 1),
-        "pivot": (1, 1),
-        "compare": (2, 2),
-        "rfm": (1, 1),
-        "recipe": (1, 1),
-        "finance": (1, 1),
-        "sales_management_report": (1, 1),
-        "quarterly_sales_report": (2, 12),
-        "inventory_management_report": (5, 12),
-        "hr_management_report": (4, 20),
-        # The generic compiler is schema-driven rather than case-count driven.
-        # Large customer workbooks commonly contain dozens of facts, masters
-        # and notes, so keep the same safe upper bound as enterprise diagnosis.
-        "adaptive_analysis_report": (1, 100),
-        "selection_recommendation_report": (1, 20),
-        # Business diagnosis is capability-gated by the domain recognisers,
-        # not by an arbitrary sheet count.  A validated store-period P&L may
-        # be one fact sheet plus one summary, while large projects may contain
-        # dozens of independent fact/master tables.
-        "enterprise_diagnosis_report": (1, 100),
-    }
-)
-
-_PARAM_KEYS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = MappingProxyType(
-    {
-        "clean": (
-            frozenset(),
-            frozenset(
-                {
-                    "trim_whitespace",
-                    "normalize_blank_strings",
-                    "drop_empty_rows",
-                    "drop_empty_columns",
-                    "drop_duplicates",
-                    "duplicate_subset",
-                    "keep_duplicate",
-                    "infer_types",
-                    "type_inference_threshold",
-                    "missing_strategy",
-                    "missing_subset",
-                    "drop_missing_how",
-                    "fill_values",
-                    "fill_numeric_with",
-                    "fill_text_with",
-                    "fill_boolean_with",
-                    "reset_index",
-                }
-            ),
-        ),
-        "select_rename_sort": (
-            frozenset(),
-            frozenset({"columns", "rename", "sort_by", "ascending", "na_position", "reset_index"}),
-        ),
-        "concat": (
-            frozenset(),
-            frozenset({"join", "ignore_index", "source_column"}),
-        ),
-        "join": (
-            frozenset(),
-            frozenset({"on", "left_on", "right_on", "how", "suffixes", "validate"}),
-        ),
-        "lookup": (
-            frozenset({"source_key"}),
-            frozenset(
-                {
-                    "source_key",
-                    "lookup_key",
-                    "value_columns",
-                    "keep_lookup_duplicate",
-                    "add_match_column",
-                    "match_column",
-                }
-            ),
-        ),
-        "summary": (
-            frozenset({"by", "aggregations"}),
-            frozenset({"by", "aggregations", "dropna", "sort"}),
-        ),
-        "split": (
-            frozenset(),
-            frozenset({"by", "rows_per_table", "drop_group_columns"}),
-        ),
-        "mask": (
-            frozenset({"columns"}),
-            frozenset({"columns", "strategy", "salt", "mask_char", "keep_start", "keep_end"}),
-        ),
-        "validate": (
-            frozenset({"rules"}),
-            frozenset({"rules", "include_values", "max_value_chars"}),
-        ),
-        "reconcile": (
-            frozenset({"left_amount", "right_amount"}),
-            frozenset(
-                {
-                    "left_amount",
-                    "right_amount",
-                    "left_date",
-                    "right_date",
-                    "left_key_columns",
-                    "right_key_columns",
-                    "left_secondary_columns",
-                    "right_secondary_columns",
-                    "amount_tolerance",
-                    "date_tolerance_days",
-                    "enable_split_candidates",
-                    "max_candidates_per_row",
-                    "max_candidate_pairs",
-                    "max_split_combinations",
-                }
-            ),
-        ),
-        "fuzzy_cluster": (
-            frozenset({"column"}),
-            frozenset({"column", "threshold", "max_unique"}),
-        ),
-        "fuzzy_lookup": (
-            frozenset({"source_key", "lookup_key", "value_columns"}),
-            frozenset(
-                {
-                    "source_key",
-                    "lookup_key",
-                    "value_columns",
-                    "threshold",
-                    "ambiguous_gap",
-                }
-            ),
-        ),
-        "quality": (frozenset(), frozenset({"key_columns"})),
-        "describe": (
-            frozenset(),
-            frozenset({"columns", "include_text", "percentiles"}),
-        ),
-        "correlation": (
-            frozenset(),
-            frozenset({"columns", "method", "min_periods"}),
-        ),
-        "outliers": (
-            frozenset(),
-            frozenset({"columns", "method", "iqr_multiplier", "z_threshold"}),
-        ),
-        "trend": (
-            frozenset({"date_column", "value_columns"}),
-            frozenset(
-                {
-                    "date_column",
-                    "value_columns",
-                    "frequency",
-                    "aggregation",
-                    "group_by",
-                    "period_column",
-                }
-            ),
-        ),
-        "contribution": (
-            frozenset({"category_columns", "value_column"}),
-            frozenset(
-                {
-                    "category_columns",
-                    "value_column",
-                    "aggregation",
-                    "pareto_threshold",
-                    "top_n",
-                    "include_other",
-                }
-            ),
-        ),
-        "pivot": (
-            frozenset({"index", "columns"}),
-            frozenset({"index", "columns", "values", "aggregation", "fill_value", "margins", "margins_name"}),
-        ),
-        "compare": (
-            frozenset({"key_columns"}),
-            frozenset({"key_columns", "compare_columns", "suffixes", "include_unchanged"}),
-        ),
-        "rfm": (
-            frozenset({"customer_column", "date_column", "amount_column"}),
-            frozenset(
-                {
-                    "customer_column",
-                    "date_column",
-                    "amount_column",
-                    "transaction_column",
-                    "reference_date",
-                    "quantiles",
-                }
-            ),
-        ),
-        "recipe": (
-            frozenset({"name", "steps"}),
-            frozenset({"name", "description", "steps", "schema_version"}),
-        ),
-        "finance": (
-            frozenset({"task", "columns"}),
-            frozenset({"task", "columns", "as_of_date", "buckets", "perspective", "tolerance"}),
-        ),
-        "sales_management_report": (
-            frozenset(
-                {
-                    "date_column",
-                    "product_column",
-                    "region_column",
-                    "salesperson_column",
-                    "sales_column",
-                    "cost_column",
-                    "satisfaction_column",
-                }
-            ),
-            frozenset(
-                {
-                    "date_column",
-                    "product_column",
-                    "region_column",
-                    "salesperson_column",
-                    "sales_column",
-                    "cost_column",
-                    "satisfaction_column",
-                    "quantity_column",
-                    "satisfaction_threshold",
-                }
-            ),
-        ),
-        "quarterly_sales_report": (
-            frozenset({"source_names"}),
-            frozenset({"source_names", "satisfaction_threshold"}),
-        ),
-        "inventory_management_report": (
-            frozenset({"source_names"}),
-            frozenset({"source_names", "recent_days", "overstock_multiplier"}),
-        ),
-        "hr_management_report": (
-            frozenset({"source_names"}),
-            frozenset({"source_names", "expected_workdays", "excellent_score", "attention_score"}),
-        ),
-        "adaptive_analysis_report": (
-            frozenset({"source_names"}),
-            frozenset({"source_names", "user_request", "top_n", "outlier_multiplier"}),
-        ),
-        "selection_recommendation_report": (
-            frozenset({"source_names", "top_n"}),
-            frozenset({"source_names", "user_request", "top_n", "include_charts"}),
-        ),
-        "enterprise_diagnosis_report": (
-            frozenset({"source_names"}),
-            frozenset({"source_names", "user_request", "low_margin_threshold"}),
-        ),
-    }
-)
-
 
 class DeepSeekAPIError(RuntimeError):
     """A sanitised DeepSeek transport or response failure."""
@@ -1078,6 +791,13 @@ def _validate_operation_params(operation: str, params: Mapping[str, Any]) -> lis
         return [f"步骤 {operation} 还需要参数：{', '.join(missing)}"]
     _validate_common_param_types(operation, params)
 
+    if operation in structured_ops.OPERATIONS:
+        try:
+            structured_ops.validate_params(operation, params)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PlanValidationError(f"{operation}: {exc}") from exc
+        return []
+
     if operation == "clean":
         if "keep_duplicate" in params:
             _enum(params["keep_duplicate"], name="clean.keep_duplicate", allowed={"first", "last", False})
@@ -1109,6 +829,9 @@ def _validate_operation_params(operation: str, params: Mapping[str, Any]) -> lis
             _enum(params["join"], name="concat.join", allowed={"outer", "inner"})
 
     elif operation == "join":
+        if "allow_many_to_many" in params and not isinstance(params["allow_many_to_many"], bool):
+            raise PlanValidationError("allow_many_to_many 必须是布尔值")
+        _require_int(params.get("max_output_rows", 300_000), name="max_output_rows", minimum=1, maximum=300_000)
         how = params.get("how", "left")
         _enum(how, name="join.how", allowed={"left", "right", "inner", "outer", "cross"})
         if (
@@ -1162,6 +885,8 @@ def _validate_operation_params(operation: str, params: Mapping[str, Any]) -> lis
             _require_int(params[key], name=f"mask.{key}", minimum=0, maximum=100)
 
     elif operation == "validate":
+        if "fail_on_error" in params and not isinstance(params["fail_on_error"], bool):
+            raise PlanValidationError("fail_on_error 必须是布尔值")
         rules = params["rules"]
         if isinstance(rules, (str, bytes)) or not isinstance(rules, (list, tuple)) or not rules:
             raise PlanValidationError("validate.rules 必须是非空规则列表")
@@ -1274,6 +999,11 @@ def _validate_operation_params(operation: str, params: Mapping[str, Any]) -> lis
             validate_adaptive_report_params(_thaw_json(params))
         except (TypeError, ValueError) as exc:
             raise PlanValidationError(f"通用自适应分析参数无效：{exc}") from exc
+    elif operation == "customer_order_analysis":
+        try:
+            validate_customer_order_params(_thaw_json(params))
+        except (TypeError, ValueError) as exc:
+            raise PlanValidationError(f"客户订单分析参数无效：{exc}") from exc
     elif operation == "selection_recommendation_report":
         try:
             validate_selection_report_params(_thaw_json(params))
@@ -1463,6 +1193,7 @@ def _column_candidates(operation: str, params: Mapping[str, Any]) -> list[str]:
     """Return obvious referenced columns for catalogue preflight."""
 
     keys = {
+        "subset",
         "columns",
         "duplicate_subset",
         "missing_subset",
@@ -1504,6 +1235,19 @@ def _column_candidates(operation: str, params: Mapping[str, Any]) -> list[str]:
             result.extend(item for item in value if isinstance(item, str))
     if operation == "summary" and isinstance(params.get("aggregations"), Mapping):
         result.extend(str(key) for key in params["aggregations"])
+    if operation == "normalize_fields":
+        result.extend(params.get("fields", {}))
+    if operation == "partition":
+        result.extend(condition["column"] for rule in params.get("rules", ()) for condition in rule["conditions"])
+    if operation == "derive_columns":
+        # A later formula may reference a column created earlier in this step.
+        derived: set[str] = set()
+        for formula in params.get("formulas", ()):
+            for key in ("left", "right"):
+                column = formula[key].get("column")
+                if column is not None and column not in derived:
+                    result.append(column)
+            derived.add(formula["output"])
     if operation == "select_rename_sort" and isinstance(params.get("rename"), Mapping):
         result.extend(str(key) for key in params["rename"])
     if operation == "validate" and isinstance(params.get("rules"), (list, tuple)):
@@ -1622,7 +1366,7 @@ def validate_plan(payload: Mapping[str, Any], catalog: Mapping[str, Any]) -> Age
             raise PlanValidationError(f"步骤 ID 重复：{step_id}")
         if not _STEP_ID.fullmatch(step_id):
             raise PlanValidationError(f"步骤 ID 不合法：{step_id}")
-        input_ids = _string_list(raw_step["input_ids"], name=f"{step_id}.input_ids", max_items=20)
+        input_ids = _string_list(raw_step["input_ids"], name=f"{step_id}.input_ids", max_items=_INPUT_COUNTS[operation][1])
         minimum, maximum = _INPUT_COUNTS[operation]
         if not minimum <= len(input_ids) <= maximum:
             clarification.append(
@@ -1696,9 +1440,23 @@ def preview_plan(plan: AgentPlan, tables: Mapping[str, pd.DataFrame]) -> PlanPre
         raise TypeError("tables 必须是表 ID 到 DataFrame 的映射")
     if not plan.executable:
         return PlanPreview(False, 0, (), tuple(plan.warnings))
-    available = set(tables)
+    available: set[str] = set()
+    seen_steps: set[str] = set()
+    if not plan.steps or len(plan.steps) > MAX_PLAN_STEPS:
+        raise PlanValidationError("ready 计划需要 1..20 个步骤")
     preview_rows: list[Mapping[str, Any]] = []
     for step in plan.steps:
+        if step.id in seen_steps or step.id in tables:
+            raise PlanValidationError(f"步骤 ID 重复或与输入表冲突：{step.id}")
+        seen_steps.add(step.id)
+        minimum, maximum = _INPUT_COUNTS[step.operation]
+        if not minimum <= len(step.input_ids) <= maximum:
+            raise PlanValidationError(f"{step.operation} 输入表数量必须在 {minimum}..{maximum}")
+        missing = _validate_operation_params(step.operation, step.params)
+        if missing:
+            raise PlanValidationError("；".join(missing))
+        if "source_names" in step.params and len(step.params["source_names"]) != len(step.input_ids):
+            raise PlanValidationError("source_names 必须与输入表逐一对应")
         resolved: list[str] = []
         for reference in step.input_ids:
             match = _REFERENCE.fullmatch(reference)
@@ -1747,6 +1505,8 @@ def _make_named_outputs(base_name: str, outputs: Mapping[str, pd.DataFrame]) -> 
 def _execute_step(step: AgentStep, inputs: Sequence[pd.DataFrame]) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
     params = _thaw_json(step.params)
     operation = step.operation
+    if operation in structured_ops.OPERATIONS:
+        return structured_ops.execute(operation, inputs[0], params)
     if operation == "clean":
         result, report = smart_clean(inputs[0], CleaningConfig(**params))
         return {"primary": result}, _safe_report(**report.to_dict())
@@ -1779,10 +1539,13 @@ def _execute_step(step: AgentStep, inputs: Sequence[pd.DataFrame]) -> tuple[dict
         result = mask_columns(inputs[0], output_name=step.output_name, **params)
         return {"primary": result}, _safe_report(rows=len(result), masked_columns=len(params["columns"]))
     if operation == "validate":
+        fail_on_error = params.pop("fail_on_error", False)
         rules = [ValidationRule.from_dict(item) for item in params.pop("rules")]
         report = validate_dataframe(inputs[0], rules, **params)
+        if fail_on_error and not report.passed:
+            raise ValueError("质量门禁失败，后续步骤未执行")
         return {
-            "primary": report.failures_frame(),
+            "primary": inputs[0].copy(deep=True) if fail_on_error else report.failures_frame(),
             "failures": report.failures_frame(),
             "rule_results": report.rule_results_frame(),
         }, _safe_report(**report.to_dict(include_failures=False))
@@ -1916,6 +1679,9 @@ def _execute_step(step: AgentStep, inputs: Sequence[pd.DataFrame]) -> tuple[dict
         return {"primary": result.outputs["管理层通用总览"], **dict(result.outputs)}, _safe_report(
             **dict(result.report)
         )
+    if operation == "customer_order_analysis":
+        result = build_customer_order_analysis(inputs, **params)
+        return {"primary": result.outputs["管理看板"], **dict(result.outputs)}, _safe_report(**dict(result.report))
     if operation == "selection_recommendation_report":
         result = build_selection_recommendation_report(inputs, **params)
         return {"primary": result.outputs["评选管理总览"], **dict(result.outputs)}, _safe_report(**dict(result.report))
@@ -1956,6 +1722,7 @@ def execute_plan(
     generated: dict[str, pd.DataFrame] = {}
     reports: dict[str, Mapping[str, Any]] = {}
     warnings = list(plan.warnings)
+    registry = build_builtin_registry(sorted(ALLOWED_AGENT_OPERATIONS))
     for step in plan.steps:
         resolved_inputs: list[pd.DataFrame] = []
         for reference in step.input_ids:
@@ -1969,8 +1736,12 @@ def execute_plan(
                 resolved_inputs.append(references[ref_key].copy(deep=True))
             else:
                 resolved_inputs.append(sources[reference].copy(deep=True))
+        started = perf_counter()
+        input_audit = [dict(rows=len(frame), columns=frame.shape[1], fingerprint=dataframe_fingerprint(frame))
+                       for frame in resolved_inputs]
         try:
-            outputs, report = _execute_step(step, resolved_inputs)
+            outputs, report = registry.execute(step.operation, _thaw_json(step.params),
+                                               resolved_inputs, output_name=step.output_name)
         except (KeyError, TypeError, ValueError) as exc:
             raise AgentExecutionError(f"步骤 {step.id}（{step.operation}）执行失败：{exc}") from exc
         if not outputs:
@@ -1978,16 +1749,12 @@ def execute_plan(
         for artifact, frame in outputs.items():
             if not isinstance(frame, pd.DataFrame):
                 raise AgentExecutionError(f"步骤 {step.id} 产生了无效表格输出")
+            if not frame.columns.is_unique:
+                raise AgentExecutionError(f"步骤 {step.id} 产生了重复字段名称")
+            if len(frame) > 300_000 or frame.size > 5_000_000:
+                raise AgentExecutionError(f"步骤 {step.id} 超过输出安全上限")
             references[f"{step.id}:{artifact}"] = frame.copy(deep=True)
-        if step.operation in {
-            "sales_management_report",
-            "quarterly_sales_report",
-            "inventory_management_report",
-            "hr_management_report",
-            "adaptive_analysis_report",
-            "selection_recommendation_report",
-            "enterprise_diagnosis_report",
-        }:
+        if step.operation in REPORT_OPERATIONS:
             friendly = {artifact: frame.copy(deep=True) for artifact, frame in outputs.items() if artifact != "primary"}
         else:
             friendly = _make_named_outputs(step.output_name, outputs)
@@ -1998,7 +1765,15 @@ def execute_plan(
                 candidate = f"{name}_{suffix}"
                 suffix += 1
             generated[candidate] = frame.copy(deep=True)
-        reports[step.id] = report
+        reports[step.id] = {**report, "execution": {
+            "operation": step.operation, "contract_version": 1, "status": "completed",
+            "duration_ms": round((perf_counter() - started) * 1000, 3),
+            "parameter_sha256": hashlib.sha256(json.dumps(_thaw_json(step.params), sort_keys=True,
+                                                          ensure_ascii=False).encode("utf-8")).hexdigest(),
+            "inputs": input_audit,
+            "outputs": {name: dict(rows=len(frame), columns=frame.shape[1], fingerprint=dataframe_fingerprint(frame))
+                        for name, frame in outputs.items()},
+        }}
     return AgentExecutionResult(plan, dry_run, generated, reports, tuple(warnings))
 
 
@@ -2017,6 +1792,7 @@ status 只能是 ready、clarification、unsupported。
 最小合法 JSON 示例：{{"schema_version":1,"status":"ready","summary":"输入范围：订单表；处理动作：清理文本空格并移除空行空列；关键字段/规则/阈值：不改变业务值；输出：独立的订单清洗结果表；人工核验边界：无明确规则的异常值不自动修改。","message":"可执行","clarification_questions":[],"assumptions":[],"warnings":[],"steps":[{{"id":"step_1","operation":"clean","input_ids":["目录中的表ID"],"output_name":"订单清洗结果","params":{{}}}}]}}。
 
 操作最小参数约定：
+通用标准步骤：normalize_fields 需要 fields 对象（列名→strip/case/unicode/mapping 配置），只做确定的文本标准化，不猜测名称映射；deduplicate 需要 subset（完整重复键），输出 primary 与 rejected，业务键重复且值冲突不能仅据键删除；partition 需要 rules（每项 conditions/combine/reason），命中排除条件的记录输出 rejected 并保留原因，其余输出 primary；derive_columns 需要 formulas（output/operator/left/right，可选 round），运算仅 add/subtract/multiply/divide，left/right 为 {{"column":"真实列"}} 或 {{"literal":数字}}，不接受代码表达式。errors 默认为 raise，可明确 coerce 保留空值及 review。validate 的 fail_on_error=true 是质量门禁；通过时 primary 保留输入，失败停止后续步骤。join 默认禁止多对多扩行，不能为生成结果随意放宽。
 clean 只允许 trim_whitespace/normalize_blank_strings/drop_empty_rows/drop_empty_columns/drop_duplicates/duplicate_subset/keep_duplicate/infer_types/type_inference_threshold/missing_strategy/missing_subset/drop_missing_how/fill_values/fill_numeric_with/fill_text_with/fill_boolean_with/reset_index；缺失值策略用 missing_strategy=keep|drop_rows|fill，严禁输出 fill_missing 或 date_format；select_rename_sort 可选 columns/rename/sort_by；concat 至少两表；join 两表且需 on 或 left_on+right_on；lookup 需 source_key；summary 需 by+aggregations；split 需 by 或 rows_per_table 二选一；mask 需 columns；validate 需 rules；reconcile 两表且需 left_amount+right_amount；fuzzy_cluster 需 column；fuzzy_lookup 需 source_key+lookup_key+value_columns；quality/describe/correlation/outliers 可选参数；trend 需 date_column+value_columns；contribution 需 category_columns+value_column；pivot 需 index+columns；compare 两表且需 key_columns；rfm 需 customer_column+date_column+amount_column；recipe 需 name+steps，且 recipe.steps 只允许 clean/replace/select_rename_sort/fill_missing/drop_duplicates/filter/summary；finance 需 task+columns，task 只能是 ar_aging/budget_variance/cash_flow/financial_ratios/journal_audit，columns 把标准财务字段映射到目录中的真实列名：ar_aging 至少 due_date+amount，可选 counterparty/invoice/paid_amount；budget_variance 需 period+category+actual+budget；cash_flow 需 date+amount，可选 direction/category/counterparty；financial_ratios 可映射 period/revenue/gross_profit/net_profit/current_assets/current_liabilities/inventory/total_assets/current_liabilities/inventory/total_assets/total_liabilities/equity/operating_cash_flow/accounts_receivable/cogs；journal_audit 需 voucher+debit+credit，可选 date/account/description。不得用 finance 计算税额、代替会计政策判断或补造缺失金额；sales_management_report 用于单张规范销售表的五表经营报告；quarterly_sales_report 用于 2-12 张字段和格式不一致的月度销售表；inventory_management_report 用于采购销售库存经营报告；hr_management_report 用于员工考勤绩效薪资经营报告；selection_recommendation_report 用于从含序号/编号/姓名、多个得分字段和评语的问题记录中选出指定人数，输出结构化排名、风险与规则，可用 include_charts=true|false 控制是否生成看板；enterprise_diagnosis_report 用于同时包含订单/收入、客户、人员绩效、费用、库存及可选生产成本等多事实域数据的经营诊断。该模块必须先识别各表角色并在各事实域内聚合，禁止把不同粒度表直接连接；生产成本不默认等同销售成本，缺失成本必须保留为空而不是零，退款展示多情景，未知客户不得判定为低风险，综合风险不得无依据低于源业务风险，关系同时披露行覆盖率与唯一键覆盖率，事实、建议和人工核验边界分开呈现，并生成利润驱动、客户与回款、销售团队、成本、库存、行动计划、底稿、验收和看板十表；adaptive_analysis_report 是专用模块均不匹配时的通用兜底。未知业务含义必须作为推断口径与人工核验边界，不得虚构业务规则。
 """
 

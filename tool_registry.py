@@ -8,6 +8,8 @@ import threading
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Mapping, Sequence
 
+from .operation_contracts import INPUT_COUNTS, PARAM_KEYS
+
 Validator = Callable[[Mapping[str, Any]], None]
 Executor = Callable[..., Any]
 
@@ -84,7 +86,7 @@ class ToolRegistry:
         schema = item.definition.parameter_schema
         allowed = set(map(str, schema.get("properties", {}))) if isinstance(schema, Mapping) else set()
         required = set(map(str, schema.get("required", ()))) if isinstance(schema, Mapping) else set()
-        if allowed:
+        if schema.get("additionalProperties") is False:
             unknown = set(map(str, params)) - allowed
             if unknown:
                 raise ValueError(f"工具 {name} 包含未知参数：{', '.join(sorted(unknown))}")
@@ -143,18 +145,35 @@ def build_builtin_registry(operation_names: Sequence[str]) -> ToolRegistry:
     )
     for raw in sorted(set(map(str, operation_names))):
         risk = "high" if raw in high_risk else "medium" if raw in medium_risk else "low"
+        required, allowed = PARAM_KEYS.get(raw, (frozenset(), frozenset(common_parameters)))
+        def validate_params(params: Mapping[str, Any], operation: str = raw) -> None:
+            from .nl_agent import _validate_operation_params
+            missing = _validate_operation_params(operation, params)
+            if missing:
+                raise ValueError("；".join(missing))
+
+        def execute_params(params: Mapping[str, Any], inputs: Sequence[Any], *,
+                           output_name: str = "结果", operation: str = raw) -> Any:
+            from .nl_agent import AgentStep, _execute_step
+            minimum, maximum = INPUT_COUNTS[operation]
+            if not minimum <= len(inputs) <= maximum:
+                raise ValueError(f"{operation} requires {minimum}..{maximum} inputs")
+            return _execute_step(AgentStep("registered_step", operation,
+                                tuple(f"input_{i}" for i in range(len(inputs))), output_name, params), inputs)
+
         registry.register(ToolDefinition(
             name=raw,
             title=raw.replace("_", " "),
             category=categories.get(raw, "AI 白名单能力"),
             description=f"表格快处本地白名单操作：{raw}",
-            parameter_schema=_object_schema(tuple(dict.fromkeys(common_parameters))),
+            parameter_schema=_object_schema(sorted(allowed), sorted(required)),
             output_schema={"type": "object", "description": "本地结构化结果或交付表"},
             risk_level=risk,
             requires_confirmation=risk in {"medium", "high"},
             supports_preview=raw not in high_risk,
             supports_background=True,
-        ))
+        ), validator=validate_params if raw in PARAM_KEYS else None,
+           executor=execute_params if raw in PARAM_KEYS else None)
     return registry
 
 

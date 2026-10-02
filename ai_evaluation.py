@@ -63,7 +63,7 @@ class EvaluationScenario:
             raise ValueError("评测场景编号无效")
         if not 2 <= len(self.prompt) <= 8000:
             raise ValueError("评测需求长度无效")
-        if self.expected_status not in {"ready", "needs_clarification", "unsupported"}:
+        if self.expected_status not in {"ready", "clarification", "needs_clarification", "unsupported"}:
             raise ValueError("评测期望状态无效")
 
     def to_dict(self) -> dict[str, Any]:
@@ -201,7 +201,8 @@ def run_evaluation(
             summary, fingerprint = combined.rsplit("\n", 1)
         except Exception as exc:  # evaluation records failures instead of aborting the batch
             failures.append(f"execution_error:{type(exc).__name__}:{str(exc)[:300]}")
-        if not failures and status != scenario.expected_status:
+        equivalent_status = lambda value: "clarification" if value == "needs_clarification" else value
+        if not failures and equivalent_status(status) != equivalent_status(scenario.expected_status):
             failures.append(f"status:{status or '<empty>'}!={scenario.expected_status}")
         for operation in scenario.expected_operations:
             if operation not in operations:
