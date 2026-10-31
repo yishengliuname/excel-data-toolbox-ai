@@ -66,6 +66,21 @@ def test_status_alias_is_compatible_with_real_planner_contract():
     assert report.passed == 1
 
 
+def test_currency_and_integer_percentages_complete_validated_workflow(tmp_path):
+    tables = fixture()
+    tables["orders"] = tables["orders"].assign(币种="USD", 利润率=["30%", "20%", "26%", "25%"])
+    # The ratio is recomputed from actual amounts, not averaged from the text.
+    expected = replace(scenario("currency_percentage", minimum_charts=3), checks=(
+        OutputCheck("管理层通用总览", "结果", 1000, "指标", "核心指标：销售额"),
+        OutputCheck("管理层通用总览", "单位", "USD", "指标", "核心指标：销售额"),
+        OutputCheck("管理层通用总览", "结果", .25, "指标", "核心指标：利润率"),
+    ))
+    report = run_workflow_evaluation([expected], tables, planner=mock_planner,
+        planner_kind="mock", destination_dir=tmp_path)
+    assert report["passed"] == 1 and report["failed"] == 0, report
+    assert report["results"][0]["workbook_verified"]
+
+
 @pytest.mark.parametrize("prompt", [
     "全面分析这些陌生数据，找出指标、趋势、排名和异常，生成老板看的 Excel 报表。",
     "帮我看看整体表现，按月份看变化、按地区看表现，把口径问题单列，输出经营看板。",

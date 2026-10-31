@@ -1,5 +1,13 @@
 # 更新记录
 
+## Unreleased
+
+- 新增版本化业务规则准备层、确认面板与本机客户配置复用，拒绝字段漂移、未确认状态与不安全关联。
+- 通用编译器支持确认的自定义指标、时间口径与维度属性关系；执行按契约计算，不因换字段名恢复猜测聚合。
+- 规则路径新增原始记录留档、排除明细与完整规则审计；有需求证据缺口时不声明完整经营诊断。
+- 新增合成规则验收及实际 localhost HTTP → 确认 → 执行 → Excel 下载回读测试。
+- 保留现有行业路径；未宣称任意行业/任意 Excel 全自动正确，未调用外部 AI 或发布新 Release。
+
 ## 9.9.0 - 2026-08-25
 
 - Published the open-source repository with an English-first README, repeatable synthetic demo, community templates, and release documentation.

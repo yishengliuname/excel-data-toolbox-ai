@@ -19,12 +19,16 @@ import pandas as pd
 
 try:
     from .analysis_compiler import compile_analysis
-    from .metric_semantics import classify_metric, classify_sheet_role, grouped_metric
+    from .metric_semantics import classify_metric, classify_sheet_role
     from .business_contracts import contracts_frame, evaluate_metric, questions_frame, numeric_values
+    from .business_rules import prepare_business_data, validate_business_rules
+    from .multifact_pipeline import compile_declared_policy, build_declared_report
 except ImportError:  # Supports: python adaptive_report.py
     from excel_data_toolbox.analysis_compiler import compile_analysis
-    from excel_data_toolbox.metric_semantics import classify_metric, classify_sheet_role, grouped_metric
+    from excel_data_toolbox.metric_semantics import classify_metric, classify_sheet_role
     from excel_data_toolbox.business_contracts import contracts_frame, evaluate_metric, questions_frame, numeric_values
+    from excel_data_toolbox.business_rules import prepare_business_data, validate_business_rules
+    from excel_data_toolbox.multifact_pipeline import compile_declared_policy, build_declared_report
 
 
 _NON_WORD = re.compile(r"[\s_\-（）()【】\[\]：:/.]+")
@@ -57,9 +61,7 @@ def _numeric(series: pd.Series) -> tuple[pd.Series, float, bool]:
     percent = bool(percent_mask.any())
     # Formatting is not unit conversion. Never strip kg/boxes/$ or guess a
     # conversion factor. Percent notation is converted per cell, not by vote.
-    cleaned = raw.str.replace(r"[¥￥,，%％\s]", "", regex=True)
-    converted = pd.to_numeric(cleaned, errors="coerce")
-    converted = converted.where(~percent_mask, converted / 100.0)
+    converted = numeric_values(series)
     denominator = int(raw.ne("").sum())
     ratio = float(converted.notna().sum() / denominator) if denominator else 0.0
     return converted, ratio, percent
@@ -143,9 +145,12 @@ def _clean_frame(frame: pd.DataFrame, roles: Mapping[str, Mapping[str, Any]] | N
             if parsed.notna().all():
                 work[column] = parsed
         elif role in {"数值指标", "比例/评分"}:
-            numeric_values, ratio, _ = _numeric(work[column])
-            if ratio == 1.0 and numeric_values.notna().all():
-                work[column] = numeric_values
+            converted = numeric_values(work[column], allow_percent=classify_metric(column).kind == "ratio")
+            # Preserve currency symbols as source evidence, including conflicts
+            # with a declared currency. Do not launder invalid unit notation.
+            currency_symbols = work[column].astype("string").str.contains(r"[¥￥$€£]", na=False).any()
+            if converted.notna().all() and not currency_symbols:
+                work[column] = converted
         elif role not in {"标识符", "文本标识"}:
             work[column] = work[column].map(lambda value: _text(value, limit=None))
     before = len(work)
@@ -202,6 +207,8 @@ def validate_adaptive_report_params(params: Mapping[str, Any]) -> None:
     multiplier = params.get("outlier_multiplier", 1.5)
     if isinstance(multiplier, bool) or not isinstance(multiplier, (int, float)) or not 1 <= float(multiplier) <= 10:
         raise ValueError("outlier_multiplier 必须是1到10之间的数字")
+    if "business_rules" in params:
+        validate_business_rules(params["business_rules"])
 
 
 @dataclass(frozen=True)
@@ -226,6 +233,7 @@ def build_adaptive_analysis_report(
     user_request: str = "",
     top_n: int = 10,
     outlier_multiplier: float = 1.5,
+    business_rules: Mapping[str, Any] | None = None,
 ) -> AdaptiveReportResult:
     """Build an evidence-gated multi-fact report; never invent cleaning policy."""
 
@@ -235,14 +243,26 @@ def build_adaptive_analysis_report(
     })
     if len(frames) != len(source_names):
         raise ValueError("source_names 数量必须与输入表数量一致")
+    # Explicit customer declarations, not LLM approval or answers, can bind
+    # supported local primitives. Recompile against the current input snapshot.
+    if business_rules is None:
+        declared = compile_declared_policy(frames, source_names, user_request)
+        if declared is not None:
+            outputs, report = build_declared_report(frames, source_names, declared)
+            return AdaptiveReportResult(outputs=outputs, report=report)
+    prepared = prepare_business_data(frames, source_names, business_rules) if business_rules is not None else None
+    if prepared is not None:
+        frames = prepared.frames
     valid = [(index, frame) for index, frame in enumerate(frames) if isinstance(frame, pd.DataFrame) and not frame.empty]
     if not valid:
         raise ValueError("没有可分析的非空数据表")
 
     valid_frames = [item[1] for item in valid]
     valid_names = [source_names[item[0]] for item in valid]
-    compiled = compile_analysis(valid_frames, source_names=valid_names, user_request=user_request)
-    sheet_roles = [classify_sheet_role(name, frame) for name, frame in zip(valid_names, valid_frames)]
+    compiled = compile_analysis(valid_frames, source_names=valid_names, user_request=user_request,
+        business_contexts=prepared.contexts if prepared else None,
+        required_topics=business_rules.get("requirements", ()) if business_rules else ())
+    sheet_roles = [p.role for p in compiled.table_profiles]
     primary_local = compiled.primary_index
     # Identical physical schemas do not establish shared periods, populations
     # or duplicate policy. A merge must be a separate validated operation.
@@ -358,6 +378,10 @@ def build_adaptive_analysis_report(
                 "数据口径": f"来源：{contract.table_name}；{contract.time_basis}；{contract.population}；{method}",
             })
     overview = pd.DataFrame(overview_rows)
+    if prepared is not None:
+        overview.loc[overview["指标"].eq("主数据记录数"), "数据口径"] = "确认规则后的记录；原始记录、排除原因与规则审计另表留档"
+        overview.loc[overview["指标"].eq("主数据粒度"), "数据口径"] = "确认去重键或经唯一性核验的候选键；维度连接不改变事实行数"
+        overview.loc[overview["指标"].eq("建议表关系"), "数据口径"] = "confirmed 为已执行的维度属性关联；其余仅为待核验候选"
     ranking_rows = []
     trend_parts = []
     primary_trend = pd.DataFrame()
@@ -371,7 +395,7 @@ def build_adaptive_analysis_report(
             metric = safe_metrics[0] if safe_metrics else None
             if metric:
                 fact[metric] = numeric_values(fact[metric])
-                grouped = grouped_metric(fact, dimension, metric).rename(columns={metric: "指标值"})
+                grouped = fact.groupby(dimension, dropna=False, observed=True)[metric].sum(min_count=1).reset_index(name="指标值")
                 method = "独立事实域求和"
             else:
                 grouped = fact.groupby(dimension, dropna=False, observed=True).size().reset_index(name="指标值")
@@ -385,6 +409,7 @@ def build_adaptive_analysis_report(
                     "来源事实表": profile.name, "分析维度": dimension,
                     "分类": _text(row[dimension], limit=None) or "（空值）",
                     "指标字段": metric or "原始记录数", "汇总方式": method,
+                    "单位": contract_lookup[(fact_index, metric)].unit if metric else "条",
                     "指标值": float(row["指标值"]), "排名": rank,
                     "占比": float(row["指标值"] / total) if positive else float("nan"),
                 })
@@ -399,13 +424,13 @@ def build_adaptive_analysis_report(
         for metric in used_metrics:
             fact[metric] = numeric_values(fact[metric])
             display = metric if fact_index == primary_local else f"{profile.name}.{metric}"
-            part = part.merge(grouped_metric(fact, "月份", metric).rename(columns={metric: display}), on="月份", how="left", validate="one_to_one")
+            part = part.merge(fact.groupby("月份", dropna=False, observed=True)[metric].sum(min_count=1).reset_index(name=display), on="月份", how="left", validate="one_to_one")
         part = part.reset_index(drop=True)
         trend_parts.append(part)
         if primary_trend.empty:
             primary_trend = part.copy(deep=True)
             trend_metrics = [c for c in part if c not in {"来源事实表", "月份"}]
-    ranking = pd.DataFrame(ranking_rows, columns=["来源事实表", "分析维度", "分类", "指标字段", "汇总方式", "指标值", "排名", "占比"])
+    ranking = pd.DataFrame(ranking_rows, columns=["来源事实表", "分析维度", "分类", "指标字段", "汇总方式", "单位", "指标值", "排名", "占比"])
     trend = pd.concat(trend_parts, ignore_index=True, sort=False) if trend_parts else pd.DataFrame(columns=["来源事实表", "月份"])
 
     anomaly_rows = []
@@ -487,7 +512,12 @@ def build_adaptive_analysis_report(
     top_rank = top_rank.reset_index(drop=True)
     dashboard["排名来源"] = top_rank.iloc[0]["来源事实表"] if not top_rank.empty else "无可用数据"
     dashboard["排名口径"] = top_rank.iloc[0]["指标字段"] if not top_rank.empty else ""
+    dashboard["排名单位"] = top_rank.iloc[0]["单位"] if not top_rank.empty else ""
     dashboard["趋势来源"] = primary_trend.iloc[0]["来源事实表"] if not primary_trend.empty else "无可用数据"
+    trend_source = dashboard.iloc[0]["趋势来源"]
+    trend_field = trend_metrics[0] if trend_metrics else ""
+    dashboard["趋势单位"] = next((c.unit for c in compiled.metric_contracts
+        if c.table_name == trend_source and trend_field in {c.field, f"{c.table_name}.{c.field}"}), "")
     for column in ("分类", "指标值"):
         dashboard[f"排名{column}"] = top_rank[column].reindex(range(dashboard_rows)) if column in top_rank else pd.NA
     if not primary_trend.empty:
@@ -531,6 +561,9 @@ def build_adaptive_analysis_report(
         detail.insert(0, source_column, valid_names[index])
         detail_parts.append(detail)
     outputs["事实域明细"] = pd.concat(detail_parts, ignore_index=True, sort=False) if detail_parts else pd.DataFrame(columns=["审计_源表", "审计_记录位置"])
+    if prepared is not None:
+        outputs.update({"规则处理审计": prepared.audit, "规则排除明细": prepared.excluded,
+                        "原始记录留档": prepared.originals})
     for output in outputs.values():
         output.attrs["toolbox_report_kind"] = "adaptive_analysis_report"
     report = {
@@ -544,6 +577,9 @@ def build_adaptive_analysis_report(
         "fact_count": len(compiled.fact_indices), "fact_tables": list(compiled.fact_tables),
         "relation_count": len(relation_frame), "anomaly_count": len(anomalies),
         "sheet_count": len(outputs),
+        "business_rules_applied": prepared is not None,
+        "request_coverage": [dict(topic=q.topic, status=q.status, missing=list(q.missing),
+                                  boundary=q.conclusion_boundary) for q in compiled.question_evidence],
         "chart_count": int(dashboard["排名分类"].notna().any()) + int("月份" in dashboard and bool(trend_metrics)) + int("结构分类" in dashboard),
         "planned_chart_count": len(compiled.charts),
     }

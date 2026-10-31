@@ -19,10 +19,11 @@ import pandas as pd
 _NORMALISE = re.compile(r"[\s_\-（）()【】\[\]：:/.]+")
 _DATE = re.compile(r"日期|时间|月份|年月|期间|年度|季度|date|time|month|year|period", re.I)
 _DATE_FIELD = re.compile(r"(?:日期|时间|月份|年月|期间|年度|季度)$|^(?:date|time|month|year|period)$", re.I)
-_IDENTIFIER = re.compile(r"(^id$|编号|编码|单号|流水|序号|工号|账号|sku|code|no$)", re.I)
+_IDENTIFIER = re.compile(r"(^id$|id$|编号|编码|单号|流水|序号|行号|版本号|工号|账号|sku|code|no$)", re.I)
+_ATTRIBUTE = re.compile(r"单位$|币种$|口径$|每箱|换算|系数|账期天数|目标库存天数|安全库存|unit$|currency$", re.I)
 _RATIO = re.compile(r"率|比例|占比|完成度|转化|margin|rate|ratio|percent", re.I)
 _SCORE = re.compile(r"评分|满意度|得分|指数|score|rating", re.I)
-_BALANCE = re.compile(r"期末|余额|结余|结存|现有库存|当前库存|库存余额|balance|ending", re.I)
+_BALANCE = re.compile(r"期末|月末|余额|结余|结存|现有库存|当前库存|库存余额|balance|ending", re.I)
 _ADDITIVE = re.compile(
     r"销售|营业额|收入|金额|成本|费用|利润|退款|回款|工资|薪资|租金|水电|营销|佣金|"
     r"平台费|广告|采购|损耗|实付|到账|结算基数|revenue|sales|amount|cost|expense|profit|refund|salary",
@@ -55,6 +56,8 @@ def classify_metric(name: Any) -> MetricSemantic:
     text = str(name or "").strip()
     if _IDENTIFIER.search(text):
         return MetricSemantic("identifier", "none", "", "标识字段，不参与数值聚合")
+    if _ATTRIBUTE.search(text):
+        return MetricSemantic("attribute", "unknown", "", "单位、换算参数或业务属性不作为经营规模求和")
     if _DATE_FIELD.search(normalise(text)):
         return MetricSemantic("date", "none", "", "时间维度")
     if _DATE.search(text) and not (_ADDITIVE.search(text) or _COUNT.search(text) or _RATIO.search(text) or _SCORE.search(text)):
@@ -84,6 +87,8 @@ def classify_sheet_role(name: Any, frame: pd.DataFrame) -> str:
         return "summary"
     if _NOTES_SHEET.search(label):
         return "notes"
+    if re.search(r"主数据|主档|资料|字典|master|dimension", label, re.I):
+        return "dimension"
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return "notes"
     columns = [str(column) for column in frame.columns]

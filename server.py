@@ -16,6 +16,7 @@ from email import policy as email_policy
 from email.parser import BytesParser
 import io
 import json
+import hashlib
 import math
 import mimetypes
 import os
@@ -39,6 +40,10 @@ import zipfile
 import pandas as pd
 
 if __package__:
+    from .autopilot import input_fingerprint, run_delivery
+    from .trusted_automation import TrustedAutomationStore
+    from .task_acceptance import assess_task
+    from .analysis_compiler import _intent_topics
     from .analytics import (
         aggregate_trend,
         assess_data_quality,
@@ -91,6 +96,9 @@ if __package__:
     from .delivery_qa import acceptance_frame, export_verified, verify_delivery, write_acceptance_json
     from .secure_secrets import SecureSecretStore, SecretStoreError
     from .task_store import TaskRepository
+    from .business_workflow import BusinessProfileStore, review_business_data
+    from .business_rules import BusinessRuleError, validate_business_rules
+    from .multifact_pipeline import compile_declared_policy
     from .workbook_fidelity import preserve_workbook_export, workbook_feature_inventory
     from .advanced_automation import (
         build_vba_bundle,
@@ -103,7 +111,7 @@ if __package__:
     from .order_intake import quote_order
     from .inventory_report import can_build_inventory_report
     from .hr_report import can_build_hr_report
-    from .adaptive_report import can_build_adaptive_report
+    from .adaptive_report import build_adaptive_analysis_report, can_build_adaptive_report
     from .customer_order_analysis import can_build_customer_order_analysis, verify_customer_order_workbook
     from .selection_report import can_build_selection_report, explicit_selection_count, parse_selection_count
     from .enterprise_report import can_build_enterprise_diagnosis_report
@@ -179,6 +187,9 @@ else:  # Supports: python server.py
     from excel_data_toolbox.delivery_qa import acceptance_frame, export_verified, verify_delivery, write_acceptance_json
     from excel_data_toolbox.secure_secrets import SecureSecretStore, SecretStoreError
     from excel_data_toolbox.task_store import TaskRepository
+    from excel_data_toolbox.business_workflow import BusinessProfileStore, review_business_data
+    from excel_data_toolbox.business_rules import BusinessRuleError, validate_business_rules
+    from excel_data_toolbox.multifact_pipeline import compile_declared_policy
     from excel_data_toolbox.workbook_fidelity import preserve_workbook_export, workbook_feature_inventory
     from excel_data_toolbox.advanced_automation import (
         build_vba_bundle,
@@ -191,7 +202,7 @@ else:  # Supports: python server.py
     from excel_data_toolbox.order_intake import quote_order
     from excel_data_toolbox.inventory_report import can_build_inventory_report
     from excel_data_toolbox.hr_report import can_build_hr_report
-    from excel_data_toolbox.adaptive_report import can_build_adaptive_report
+    from excel_data_toolbox.adaptive_report import build_adaptive_analysis_report, can_build_adaptive_report
     from excel_data_toolbox.customer_order_analysis import (
         can_build_customer_order_analysis,
         verify_customer_order_workbook,
@@ -215,6 +226,10 @@ else:  # Supports: python server.py
     from excel_data_toolbox.database_connections import ConnectionProfileStore
     from excel_data_toolbox.engine_router import available_engines, choose_engine, group_summary_auto
     from excel_data_toolbox.lineage import LineageStore, dataset_metadata
+    from excel_data_toolbox.autopilot import input_fingerprint, run_delivery
+    from excel_data_toolbox.trusted_automation import TrustedAutomationStore
+    from excel_data_toolbox.task_acceptance import assess_task
+    from excel_data_toolbox.analysis_compiler import _intent_topics
     from excel_data_toolbox.session_registry import SessionProxy, SessionRegistry
     from excel_data_toolbox.task_engine import PersistentJobEngine
     from excel_data_toolbox.tool_registry import build_builtin_registry
@@ -800,6 +815,17 @@ class AiPlanTicket:
     model: str
     created_at: float
     expires_at: float
+    business_rules_approved: bool = False
+
+
+@dataclass(frozen=True)
+class BusinessReviewTicket:
+    task_id: str
+    table_ids: tuple[str, ...]
+    signatures: tuple[tuple[Any, ...], ...]
+    prompt: str
+    expires_at: float
+    customer_scope: str = ""
 
 
 class AppSession:
@@ -843,6 +869,7 @@ class AppSession:
             self.import_warnings: list[str] = []
             self.review_items: dict[str, dict[str, Any]] = {}
             self.ai_plans: dict[str, AiPlanTicket] = {}
+            self.business_reviews: dict[str, BusinessReviewTicket] = {}
             self.chart_history: list[dict[str, Any]] = []
             self.chart_redo_stack: list[dict[str, Any]] = []
             self.downloads = {}
@@ -891,6 +918,7 @@ class AppSession:
         self.import_warnings = list(restored.get("import_warnings") or [])
         self.review_items = {}
         self.ai_plans = {}
+        self.business_reviews = {}
         self.chart_history = []
         self.chart_redo_stack = []
         self.downloads = {}
@@ -1029,9 +1057,12 @@ class AppSession:
         table_signatures: tuple[tuple[Any, ...], ...],
         plan: AgentPlan,
         model: str,
+        business_rules_approved: bool = False,
     ) -> str:
         """Store a validated plan without storing its prompt, API key, or cell values."""
 
+        if any("business_rules" in step.params for step in plan.steps) and not business_rules_approved:
+            raise ApiError("模型不能自批准业务口径；必须使用业务规则确认入口", 403)
         now = time.monotonic()
         self.ai_plans = {token: ticket for token, ticket in self.ai_plans.items() if ticket.expires_at > now}
         token = secrets.token_urlsafe(32)
@@ -1043,6 +1074,7 @@ class AppSession:
             model=model,
             created_at=now,
             expires_at=now + AI_PLAN_TTL_SECONDS,
+            business_rules_approved=business_rules_approved,
         )
         return token
 
@@ -1333,6 +1365,7 @@ def _ai_table_signature(entry: TableEntry) -> tuple[Any, ...]:
         len(entry.frame),
         entry.frame.shape[1],
         tuple((str(column), str(dtype)) for column, dtype in zip(entry.frame.columns, entry.frame.dtypes)),
+        hashlib.sha256(pd.util.hash_pandas_object(entry.frame, index=True).values.tobytes()).hexdigest(),
     )
 
 
@@ -3449,6 +3482,11 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                 "/api/ai-plan": self._ai_plan,
                 "/api/ai-chart-plan": self._ai_chart_plan,
                 "/api/ai-unified": self._ai_unified,
+                "/api/ai-run": self._autonomous_submit,
+                "/api/business-review": self._business_review,
+                "/api/business-confirm": self._business_confirm,
+                "/api/business-profiles": self._business_profiles,
+                "/api/business-profile-revoke": self._business_profile_revoke,
                 "/api/ai-execute": self._ai_execute,
                 "/api/ai-engineering": self._ai_engineering,
                 "/api/clean": self._clean,
@@ -4403,23 +4441,198 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             "privacy": "需求理解与白名单规划分离；清洗、关联、计算、审计和验收全部在本机确定性执行。",
         }
 
+    def _business_profiles(self, payload: dict[str, Any]) -> dict[str, Any]:
+        _validate_payload_keys(payload, {"customer_scope"})
+        try:
+            profiles = TrustedAutomationStore(TASK_REPOSITORY.root / ".business_profiles").list(payload.get("customer_scope"))
+        except (BusinessRuleError, OSError, ValueError) as exc:
+            raise ApiError(f"客户配置不可用：{exc}", 422) from None
+        return {"profiles": profiles, "message": "配置只在本机保存；同一电脑的客户标识不是账户权限隔离。"}
+
+    def _business_profile_revoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+        _validate_payload_keys(payload, {"customer_scope", "profile_id", "confirmed"})
+        if payload.get('confirmed') is not True:
+            raise ApiError('请明确确认撤销自动授权')
+        try:
+            result = TrustedAutomationStore(TASK_REPOSITORY.root / '.business_profiles').revoke(
+                payload.get('customer_scope'), payload.get('profile_id'))
+        except (BusinessRuleError, ValueError, OSError) as exc:
+            raise ApiError(f'撤销失败：{exc}', 422) from None
+        return {**result, 'message': '自动授权已撤销；已交付文件保留，尚未执行的任务必须重新核对授权'}
+
+    def _business_review(self, payload: dict[str, Any]) -> dict[str, Any]:
+        _validate_payload_keys(payload, {"prompt", "table_ids", "customer_scope", "profile_id"})
+        prompt = payload.get("prompt")
+        ids = payload.get("table_ids")
+        if not isinstance(prompt, str) or not 8 <= len(prompt.strip()) <= AI_MAX_PROMPT_CHARS:
+            raise ApiError("请提供8至8000字符的分析需求")
+        if AI_SECRET_PATTERN.search(prompt):
+            raise ApiError("分析需求不能包含 API Key")
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or any(not isinstance(i, str) for i in ids) or len(ids) != len(set(ids)):
+            raise ApiError("请显式选择1至100张原始表")
+        with SESSION.lock:
+            entries = [SESSION.get(i) for i in ids]
+            if any(not entry.original or entry.frame.empty for entry in entries):
+                raise ApiError("规则分析只允许本任务非空原始表，不读取历史输出", 422)
+            frames = [e.frame.copy(deep=True) for e in entries]
+            names = [e.name for e in entries]
+            signatures = tuple(_ai_table_signature(e) for e in entries)
+            task_id = SESSION.task_id
+            output_dir = SESSION.output_dir
+            file_names = sorted(SESSION.file_names)
+        customer = payload.get("customer_scope", "")
+        if not isinstance(customer, str) or len(customer) > 100:
+            raise ApiError("客户标识无效")
+        if AI_SECRET_PATTERN.search(customer):
+            raise ApiError("客户标识不能包含 API Key")
+        try:
+            review = review_business_data(frames, names, prompt.strip())
+            if payload.get("profile_id"):
+                review["draft_rules"] = BusinessProfileStore(TASK_REPOSITORY.root / ".business_profiles").load_for_review(
+                    customer, payload["profile_id"], frames, names)
+        except (BusinessRuleError, TypeError, ValueError, OSError) as exc:
+            raise ApiError(f"规则识别/复用未通过检查：{exc}", 422) from None
+        # Read-only evidence is deliverable even when business transformations
+        # need approval. Proposed/reused rules MUST NOT enter this execution.
+        if sum(frame.size for frame in frames) > 5_000_000:
+            raise ApiError("阶段分析数据量过大，请缩小本次输入范围", 413)
+        try:
+            preliminary = build_adaptive_analysis_report(frames, source_names=names, user_request=prompt.strip())
+            # Full drill-down belongs to the confirmed report. The stage
+            # points back to unchanged sources without exporting a sparse,
+            # extremely wide union of unrelated fact-domain fields.
+            detail = preliminary.outputs.pop("事实域明细")
+            row_index = detail.iloc[:, :2].copy(deep=True)
+            row_index.attrs["toolbox_report_kind"] = "adaptive_analysis_report"
+            preliminary.outputs["原始记录索引"] = row_index
+            questions = [{"类型": "业务规则", "来源": "", "字段": "", "需要核验": q}
+                         for q in review["questions"]]
+            questions.extend({"类型": "指标口径", "来源": c["table"], "字段": c["field"],
+                              "需要核验": "；".join(c["issues"])} for c in review["contract_issues"])
+            stage = pd.DataFrame([
+                {"项目": "交付状态", "结果": "阶段分析已生成；完整经营结论待核验"},
+                {"项目": "输入表数", "结果": len(frames)},
+                {"项目": "原始记录数", "结果": sum(len(f) for f in frames)},
+                {"项目": "已执行", "结果": "逐表识别、质量检查、证据契约检查及可计算字段分析"},
+                {"项目": "未执行", "结果": "未批准的去重、过滤、跨表合并、退款分摊、汇率及单位换算"},
+                {"项目": "明细边界", "结果": "阶段文件保留主表明细及事实域原始记录索引；其他表的完整原始值仍保存在本次上传文件，确认后生成完整明细"},
+                {"项目": "阅读边界", "结果": "原始记录数不等于有效订单数；推断指标不等于已确认经营指标；不作为净利润或最终季度报告"},
+                {"项目": "下一步", "结果": "查看待确认事项，在页面确认业务规则后继续执行；无法确认的项保持不可计算"},
+            ])
+            stage.attrs["toolbox_report_kind"] = "adaptive_analysis_report"
+            report_tables = {"阶段交付说明": stage, "数据源确认": source_confirmation_frame(
+                frames, names, file_names=file_names, task_id=task_id, user_request=prompt.strip()),
+                **preliminary.outputs, "待确认事项": pd.DataFrame(questions, columns=["类型", "来源", "字段", "需要核验"])}
+            if sum(frame.size for frame in report_tables.values()) > 5_000_000:
+                raise ValueError("生成表超过阶段交付单元格上限，请缩小输入范围")
+            base = Path(file_names[0]).stem if len(file_names) == 1 else task_id
+            destination = output_dir / f"{_safe_filename(base)[:100]}_阶段分析与核验_{uuid.uuid4().hex[:8]}.xlsx"
+            acceptance = export_verified(report_tables, destination,
+                writer=lambda tables, path: export_tables(tables, path, include_log=False, overwrite=True))
+        except (OSError, TypeError, ValueError) as exc:
+            raise ApiError(f"阶段分析文件生成失败，未发布下载：{exc}", 422) from None
+        with SESSION.lock:
+            if SESSION.task_id != task_id or tuple(_ai_table_signature(SESSION.get(i)) for i in ids) != signatures:
+                destination.unlink(missing_ok=True)
+                raise ApiError("数据源在识别期间变化，请重新确认", 409)
+            now = time.monotonic()
+            SESSION.business_reviews = {k: v for k, v in SESSION.business_reviews.items() if v.expires_at > now}
+            if len(SESSION.business_reviews) >= 50:
+                destination.unlink(missing_ok=True)
+                raise ApiError("待确认方案过多，请结束或新建任务", 429)
+            token = secrets.token_urlsafe(32)
+            SESSION.business_reviews[token] = BusinessReviewTicket(task_id, tuple(ids), signatures,
+                prompt.strip(), now + AI_PLAN_TTL_SECONDS, customer.strip())
+            partial_delivery = {"status": "needs_review", "filename": destination.name,
+                "download_url": SESSION.register_download(destination), "validation_status": acceptance.status,
+                "source_tables": len(frames), "source_rows": sum(len(f) for f in frames),
+                "review_items": len(questions), "sheets": list(report_tables),
+                "message": "阶段分析已生成并通过文件校验；待确认业务规则没有自动执行。"}
+        return {"mode": "data", "status": "clarification", "normalized_request": prompt.strip(),
+                "message": "阶段分析与核验文件已可下载。确认表角色、时间、状态、去重键和指标口径后，继续生成业务报表。",
+                "auto_execute": False, "business_review": review, "review_token": token,
+                "partial_delivery": partial_delivery,
+                "expires_in_seconds": AI_PLAN_TTL_SECONDS}
+
+    def _business_confirm(self, payload: dict[str, Any]) -> dict[str, Any]:
+        _validate_payload_keys(payload, {"review_token", "rules", "confirmed", "customer_scope", "profile_title", "automation_limits"})
+        if payload.get("confirmed") is not True:
+            raise ApiError("必须人工核对并确认业务规则")
+        token = payload.get("review_token")
+        if not isinstance(token, str) or not token or len(token) > 200:
+            raise ApiError("业务确认凭证无效")
+        with SESSION.lock:
+            ticket = SESSION.business_reviews.get(token)
+            if ticket is None or ticket.expires_at <= time.monotonic():
+                raise ApiError("业务确认凭证已过期或已使用，请重新识别", 410)
+            if ticket.task_id != SESSION.task_id:
+                raise ApiError("任务已切换，请重新确认规则", 409)
+            entries = [SESSION.get(i) for i in ticket.table_ids]
+            if tuple(_ai_table_signature(e) for e in entries) != ticket.signatures:
+                raise ApiError("输入数据已变化，请重新确认规则", 409)
+            try:
+                rules = validate_business_rules(payload.get("rules"))
+                if AI_SECRET_PATTERN.search(json.dumps(rules, ensure_ascii=False)):
+                    raise BusinessRuleError("业务规则不得包含疑似 API Key")
+                # Keep the session lock until approval is consumed. RLock permits
+                # planning; reset/parallel confirmation cannot cross this boundary.
+                result = self._local_adaptive_analysis_plan(entries, ticket.prompt,
+                    model="local-confirmed-rules", business_rules=rules, business_rules_approved=True)
+                customer = payload.get("customer_scope", ticket.customer_scope)
+                if not isinstance(customer, str) or AI_SECRET_PATTERN.search(customer) or AI_SECRET_PATTERN.search(str(payload.get("profile_title", ""))):
+                    raise BusinessRuleError("客户标识或配置名称无效/含疑似 API Key")
+                if ticket.customer_scope and customer != ticket.customer_scope:
+                    raise BusinessRuleError("复用配置的客户标识不能在确认时改变")
+                if payload.get("automation_limits") is not None:
+                    if not payload.get("profile_title"):
+                        raise BusinessRuleError("自动授权必须保存为具名客户配置")
+                    result["saved_profile"] = TrustedAutomationStore(TASK_REPOSITORY.root / ".business_profiles").save_authorized(
+                        customer, payload["profile_title"], rules, [e.frame for e in entries], [e.name for e in entries],
+                        ticket.prompt, payload["automation_limits"])
+                elif payload.get("profile_title"):
+                    result["saved_profile"] = BusinessProfileStore(TASK_REPOSITORY.root / ".business_profiles").save(
+                        customer, payload["profile_title"], rules, [e.frame for e in entries], [e.name for e in entries])
+            except (BusinessRuleError, TypeError, ValueError, OSError) as exc:
+                if "result" in locals():
+                    SESSION.ai_plans.pop(result.get("plan_token"), None)
+                raise ApiError(f"业务规则未通过确认，原始数据未变：{exc}", 422) from None
+            SESSION.business_reviews.pop(token, None)
+        return {"mode": "data", **result}
+
     def _local_adaptive_analysis_plan(
         self,
         entries: list[TableEntry],
         prompt: str,
         *,
         model: str,
+        business_rules: Mapping | None = None,
+        business_rules_approved: bool = False,
     ) -> dict[str, Any]:
         """Build and dry-run the deterministic general adaptive report."""
 
+        if business_rules is not None and not business_rules_approved:
+            raise ApiError("业务规则需要人工确认，不能由模型自批准", 403)
         with SESSION.lock:
             current_entries = [SESSION.get(entry.id) for entry in entries]
             tables = {entry.id: entry.frame.copy(deep=True) for entry in current_entries}
             signatures = tuple(_ai_table_signature(entry) for entry in current_entries)
             task_id = SESSION.task_id
+        declared_policy = compile_declared_policy(list(tables.values()), [e.name for e in current_entries], prompt)
+        if business_rules is None and declared_policy is None and all(e.original for e in current_entries):
+            review = review_business_data(list(tables.values()), [e.name for e in current_entries], prompt)
+            if review["contract_issues"] or review["questions"]:
+                return self._business_review({"prompt": prompt, "table_ids": [e.id for e in current_entries]})
         catalog = build_table_catalog(tables, display_names={entry.id: entry.name for entry in current_entries})
         try:
-            plan = validate_plan(_adaptive_report_plan_payload(current_entries, prompt), catalog)
+            payload = _adaptive_report_plan_payload(current_entries, prompt)
+            if declared_policy is not None and business_rules is None:
+                payload["summary"] = "按用户明确引用的业务口径执行可复用清洗、版本选择、退款与成本、库存及核销操作；未知值局部隔离，交付经营结果与审计。"
+                payload["message"] = "已编译客户声明规则；执行计算、逐项勾稽并披露未确定项，不使用评审答案。"
+                payload["assumptions"] = ["仅执行明确声明且当前编译器支持的规则；未知单位、币种及冲突记录不猜测。"]
+            if business_rules is not None:
+                payload["steps"][0]["params"]["business_rules"] = business_rules
+                payload["message"] = "使用人工确认业务规则，排除记录与原始数据均保留审计。"
+            plan = validate_plan(payload, catalog)
             preview = preview_plan(plan, tables)
             dry_run_result = execute_plan(plan, tables, dry_run=True)
         except (PlanValidationError, AgentExecutionError, TypeError, ValueError) as exc:
@@ -4435,6 +4648,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                 table_signatures=signatures,
                 plan=plan,
                 model=model,
+                business_rules_approved=business_rules_approved,
             )
         return {
             "status": "ready",
@@ -4681,7 +4895,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         finally:
             api_key = ""
 
-    def _ai_unified(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _ai_unified(self, payload: dict[str, Any], *, local_only: bool = False) -> dict[str, Any]:
         """Single-command entry point for all AI capabilities."""
 
         _validate_payload_keys(payload, {"prompt", "table_ids", "current_chart_spec", "mode_hint"})
@@ -4736,6 +4950,23 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         # firewall or network is unavailable.
         config = _project_ai_config()
         model = str(config.get("model") or "deepseek-v4-flash")
+        # An explicit, supported policy has stronger evidence than a broad
+        # industry keyword. Route it before specialist recognisers, otherwise
+        # a valid multifact request can be diverted into generic review.
+        if entries and mode_hint is None and payload.get("current_chart_spec") is None:
+            policy_sources = [entry for entry in entries if entry.original] or entries
+            policy = compile_declared_policy(
+                [entry.frame for entry in policy_sources],
+                [entry.name for entry in policy_sources], original_prompt,
+            )
+            if policy is not None:
+                result = self._local_adaptive_analysis_plan(policy_sources, original_prompt, model="local-declared-policy")
+                return {"mode": "data", "route": {
+                    "intent": "data", "normalized_request": original_prompt,
+                    "data_request": original_prompt, "chart_request": "",
+                    "engineering_category": None,
+                    "reason": "用户显式引用的业务规则已绑定本次原始表，按可复用操作执行多事实计算，而非按行业关键词选择模板。",
+                }, **result}
         if mode_hint is None and payload.get("current_chart_spec") is None and _is_customer_order_analysis_request(prompt):
             customer_order_sources = _customer_order_sources(entries)
             if customer_order_sources is not None:
@@ -5036,6 +5267,9 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                     "follow_up_chart_request": route["chart_request"] if intent == "data_then_chart" else None,
                     **result,
                 }
+            if local_only:
+                return {"mode": "unsupported", "status": "clarification", "route": route,
+                    "message": "自主交付只执行本地数据与图表操作；发布、付款、采购和外部工程操作需单独授权。"}
             category = route["engineering_category"]
             result = self._ai_engineering(
                 {
@@ -5060,6 +5294,8 @@ class ToolboxHandler(BaseHTTPRequestHandler):
 
         with SESSION.lock:
             ticket = SESSION.consume_ai_plan(token)
+            if any("business_rules" in s.params for s in ticket.plan.steps) and not ticket.business_rules_approved:
+                raise ApiError("业务规则未获人工批准", 403)
             if SESSION.task_id != ticket.task_id:
                 raise ApiError("任务已发生变化，原 AI 计划不能执行", 409)
             entries = [SESSION.get(table_id) for table_id in ticket.table_ids]
@@ -5090,6 +5326,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             raise ApiError("AI 计划某张结果表超过 300,000 行安全上限，请拆分任务", 422)
 
 
+        artifact_acceptance = None
         management_report_download_url: str | None = None
         management_report_destination: Path | None = None
         sales_operation = next(
@@ -5231,7 +5468,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                         report_tables["数据源确认"] = confirmation
                 destination = SESSION.output_dir / destination_name
             try:
-                export_verified(
+                artifact_acceptance = export_verified(
                     report_tables, destination,
                     writer=lambda frames, path: export_tables(frames, path, include_log=False, overwrite=True),
                     extra_validator=(lambda path: verify_customer_order_workbook(str(path)))
@@ -5337,11 +5574,14 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             for step in ticket.plan.steps
         ]
         pending_added = len(created_review_ids)
+        coverage = [item for report in reports.values() for item in report.get("request_coverage", [])]
+        incomplete = any(item["status"] != "available" for item in coverage)
         return {
-            "status": "needs_review" if pending_added else "completed",
+            "status": "needs_review" if pending_added or incomplete else "completed",
             "message": (
                 f"AI 计划已完成 {len(ticket.plan.steps)} 步，生成 {len(output_tables)} 张结果表"
                 + (f"，新增 {pending_added} 条人工核验项" if pending_added else "")
+                + ("；部分需求证据不足，详见问题与证据，不代表完整经营诊断" if incomplete else "")
             ),
             "steps_completed": len(ticket.plan.steps),
             "tables_created": len(output_tables),
@@ -5350,6 +5590,9 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             "review_counts": review_counts,
             "output_tables": output_tables,
             "step_results": step_results,
+            "request_coverage": coverage,
+            "inputs_unchanged": True,
+            "acceptance": artifact_acceptance.to_dict() if artifact_acceptance is not None else None,
             "warnings": list(result.warnings),
             "download_url": management_report_download_url,
             "auto_download": management_report_download_url is not None,
@@ -6844,6 +7087,51 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         )
         return {"message": "后台任务已进入队列", "job": job.to_dict()}
 
+    def _autonomous_submit(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """One goal submits one durable, input-bound local delivery job."""
+        _validate_payload_keys(payload, {"prompt", "table_ids", "current_chart_spec", "mode_hint", "customer_scope", "profile_id"})
+        prompt = payload.get('prompt')
+        if not isinstance(prompt, str) or not 8 <= len(prompt.strip()) <= AI_MAX_PROMPT_CHARS:
+            raise ApiError('请提供8至8000字符的业务目标')
+        if AI_SECRET_PATTERN.search(prompt):
+            raise ApiError('需求不能包含 API Key')
+        if payload.get('mode_hint') not in (None, 'chart'):
+            raise ApiError('自主交付模式无效')
+        ids = _normalise_ai_table_scope(payload.get('table_ids'), allow_empty=False)
+        with SESSION.lock:
+            entries = [SESSION.get(i) for i in ids]
+            if any(not e.original for e in entries):
+                raise ApiError('自主经营任务只读取本次原始表，不能把历史输出当作输入；图表修改请使用图表续接入口', 422)
+            task_id = SESSION.task_id
+            signatures = {e.id: _ai_table_signature(e) for e in entries}
+            SESSION.persist()
+            goal = {k: payload[k] for k in ('prompt', 'current_chart_spec', 'mode_hint') if k in payload}
+            goal['prompt'] = prompt.strip()
+            goal['table_ids'] = ids
+            if payload.get('profile_id') or payload.get('customer_scope'):
+                if payload.get('mode_hint') or payload.get('current_chart_spec'):
+                    raise ApiError('客户自动授权仅用于规则报表，不用于图表续接')
+                customer, profile = payload.get('customer_scope'), payload.get('profile_id')
+                if not isinstance(customer, str) or AI_SECRET_PATTERN.search(customer):
+                    raise ApiError('客户标识无效/含疑似 API Key')
+                try:
+                    _, proof = TrustedAutomationStore(TASK_REPOSITORY.root / '.business_profiles').authorized_rules(
+                        customer, profile, [e.frame for e in entries], [e.name for e in entries], prompt)
+                except (BusinessRuleError, ValueError, TypeError, OSError) as exc:
+                    raise ApiError(f'自动授权未通过：{exc}', 422) from None
+                goal.update(customer_scope=customer, profile_id=profile, authorization_revision=proof['revision'])
+            identity_goal = {**goal, 'table_ids': sorted(ids)}
+            identity = input_fingerprint(json.dumps(identity_goal, sort_keys=True, ensure_ascii=False), signatures)
+            # One job at a time per task; same-input retries reuse their job.
+            active = [j for j in JOB_ENGINE.list(task_id) if j.job_type == 'business_autopilot'
+                      and j.status in {'queued', 'running', 'retrying'}]
+            job = JOB_ENGINE.submit(task_id, 'business_autopilot',
+                {'goal': goal, 'signatures': signatures}, max_attempts=1, idempotency_key=identity)
+            if active and all(j.job_id != job.job_id for j in active):
+                JOB_ENGINE.cancel(job.job_id)
+                raise ApiError('当前任务已有自主交付正在运行，请等待完成，避免需求相互覆盖', 409)
+        return {'task_id': task_id, 'message': '自主交付已进入本地后台，可刷新页面查看进度和下载结果', 'job': job.to_dict()}
+
     def _job_cancel(self, payload: dict[str, Any]) -> dict[str, Any]:
         _validate_payload_keys(payload, {"job_id"})
         job = JOB_ENGINE.get(str(payload.get("job_id") or ""))
@@ -7139,8 +7427,122 @@ def _job_lineage_export(context: Any, payload: Any) -> dict[str, Any]:
         session.close()
 
 
+def _job_business_autopilot(context: Any, payload: Any) -> dict[str, Any]:
+    # Bind to the same live session, pin it against eviction, and never alter
+    # another browser's default task. Holding its lock serialises task writes.
+    with SESSION_REGISTRY.scoped(context.task_id) as session, session.lock:
+        goal = payload['goal']
+        signatures = {i: _ai_table_signature(session.get(i)) for i in goal['table_ids']}
+        if json.loads(json.dumps(signatures, default=str)) != payload['signatures']:
+            raise ApiError('输入数据在排队期间变化，未执行旧目标，请重新提交', 409)
+        context.raise_if_cancelled()
+        directory = session.task_dir / 'autopilot'
+        directory.mkdir(exist_ok=True)
+        checkpoint = directory / f'{context.job_id}.json'
+        if checkpoint.exists():
+            saved = json.loads(checkpoint.read_text(encoding='utf-8'))
+            if saved.get('phase') == 'complete':
+                result = saved['result']
+                if saved.get('file'):
+                    path = session.output_dir / Path(saved['file']).name
+                    if not path.is_file():
+                        raise ApiError('保存的交付文件已删除，请重新生成', 410)
+                    result['download_url'] = session.register_download(path)
+                    if result.get('execution'):
+                        result['execution']['download_url'] = result['download_url']
+                return result
+            if saved.get('phase') == 'executing':
+                return {'mode': 'data', 'status': 'clarification', 'delivery_status': 'needs_reconciliation',
+                    'execution_performed': False, 'message': '上次在执行阶段中断，可能已有部分输出；先核对交付状态，不自动重复执行。'}
+
+        def save(value):
+            temporary = checkpoint.with_suffix('.tmp')
+            temporary.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False, default=str), encoding='utf-8')
+            temporary.replace(checkpoint)
+
+        handler = object.__new__(ToolboxHandler)
+
+        def authorization():
+            return TrustedAutomationStore(TASK_REPOSITORY.root / '.business_profiles').execution_guard(
+                goal['customer_scope'], goal['profile_id'],
+                [session.get(i).frame for i in goal['table_ids']],
+                [session.get(i).name for i in goal['table_ids']], goal['prompt'],
+                revision=goal['authorization_revision'])
+
+        def plan():
+            if goal.get('profile_id'):
+                with authorization() as (rules, proof):
+                    planned = {'mode': 'data', **handler._local_adaptive_analysis_plan(
+                        [session.get(i) for i in goal['table_ids']], goal['prompt'],
+                        model='local-authorized-profile', business_rules=rules, business_rules_approved=True),
+                        'authorization': proof}
+            else:
+                planned = handler._ai_unified(goal, local_only=True)
+            # This goal submission authorises local validated transformations,
+            # not inferred business rules, code, or external side effects.
+            token = planned.get('plan_token')
+            ticket = session.ai_plans.get(token) if token else None
+            if ticket is not None and all(s.operation in ALLOWED_AGENT_OPERATIONS for s in ticket.plan.steps):
+                if not any('business_rules' in s.params for s in ticket.plan.steps) or ticket.business_rules_approved:
+                    planned['auto_execute'] = True
+            return planned
+
+        def execute(token):
+            context.raise_if_cancelled()
+            if goal.get('profile_id'):
+                with authorization():
+                    save({'phase': 'executing'})
+                    return handler._ai_execute({'plan_token': token, 'confirmed': True})
+            save({'phase': 'executing'})
+            return handler._ai_execute({'plan_token': token, 'confirmed': True})
+
+        def accept(planned, execution):
+            steps = planned.get('plan', {}).get('steps', [])
+            topics = set()
+            for step in steps:
+                params = step.get('params', {})
+                if params.get('user_request'):
+                    topics.update(_intent_topics(params['user_request']))
+                    topics.update(params.get('business_rules', {}).get('requirements', []))
+            return assess_task(execution, expected_steps=len(steps), required_topics=topics)
+
+        def export(result):
+            ids = [t['id'] for t in result.get('output_tables', [])]
+            if not ids:
+                raise ApiError('没有有效输出表，不能生成交付文件', 422)
+            return handler._export({'tables': ids, 'format': 'xlsx', 'professional': False,
+                'include_summary': True, 'safe_csv': True,
+                'filename': f'{session.task_name}_处理结果_{context.job_id[:8]}'})
+
+        result = run_delivery(plan=plan,
+            execute=execute,
+            export=export, progress=context.update,
+            before_execution=context.raise_if_cancelled, accept=accept)
+        if result.get('follow_up_chart_request') and result.get('execution'):
+            context.update(92, '正在生成处理结果的后续图表')
+            first = result['execution'].get('output_tables', [{}])[0].get('id')
+            try:
+                chart = handler._ai_unified({'prompt': result['follow_up_chart_request'],
+                    'table_ids': [first], 'mode_hint': 'chart'}, local_only=True)
+                result['followup_chart'] = chart
+                if chart.get('status') != 'ready':
+                    result['delivery_status'] = 'partial'
+            except (ApiError, ValueError) as exc:
+                result['chart_warning'] = str(exc)
+                result['delivery_status'] = 'partial'
+        filename = None
+        if result.get('download_url'):
+            path = session.downloads.get(result['download_url'].rsplit('/', 1)[-1])
+            filename = path.name if path else None
+        # Save before returning to the durable job engine. A crash afterwards
+        # can recover this artifact, not re-execute the business plan.
+        save({'phase': 'complete', 'file': filename, 'result': result})
+        return result
+
+
 JOB_ENGINE.register("contract_validate", _job_contract_validate)
 JOB_ENGINE.register("lineage_export", _job_lineage_export)
+JOB_ENGINE.register("business_autopilot", _job_business_autopilot)
 
 
 def _urlquote(value: str) -> str:

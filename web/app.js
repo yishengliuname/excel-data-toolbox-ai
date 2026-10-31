@@ -17,6 +17,9 @@ const endpoints = {
   recipes: "/api/recipes", recipeSave: "/api/recipe-save", recipeRun: "/api/recipe-run",
   validate: "/api/validate", reconcileAdvanced: "/api/reconcile-advanced",
   reviews: "/api/reviews", reviewDecision: "/api/review-decision",
+  businessReview: "/api/business-review", businessConfirm: "/api/business-confirm", businessProfiles: "/api/business-profiles",
+  businessRevoke: "/api/business-profile-revoke",
+  aiRun: "/api/ai-run", jobs: "/api/jobs", jobCancel: "/api/job-cancel",
   aiCapabilities: "/api/ai-capabilities", aiDiagnose: "/api/ai-diagnose", aiPlan: "/api/ai-plan", aiChartPlan: "/api/ai-chart-plan", aiUnified: "/api/ai-unified", configStatus: "/api/config-status", aiExecute: "/api/ai-execute", aiEngineering: "/api/ai-engineering"
 };
 
@@ -2038,16 +2041,82 @@ function activateWorkspaceMode(mode) {
   window.scrollTo({top:0,behavior:"smooth"});
 }
 
-let unifiedPlanToken="", unifiedFollowupChart="", unifiedChartSpec=null;
+let unifiedPlanToken="", unifiedFollowupChart="", unifiedChartSpec=null, unifiedBusinessReview=null;
+
+function unifiedRenderBusinessReview(payload){
+  unifiedBusinessReview=payload;
+  unifiedPlanToken="";
+  const review=payload.business_review, rules=review.draft_rules, panel=$("businessReviewPanel");
+  const option=(value,label,selected)=>`<option value="${escapeHtml(value)}" ${selected?"selected":""}>${escapeHtml(label)}</option>`;
+  panel.classList.remove("hidden");
+  panel.innerHTML=`<h3>确认业务口径，再执行</h3><p>${escapeHtml(review.boundary)}</p>
+    <div class="business-profile-tools"><label>客户标识<input id="businessCustomer" maxlength="100" placeholder="例如：客户A（仅本机配置分组）"></label>
+    <button id="businessListProfiles" type="button" class="secondary-button">查询客户配置</button>
+    <label>已有配置<select id="businessProfile"><option value="">重新识别</option></select></label>
+    <button id="businessReuseProfile" type="button" class="secondary-button">载入并重新核对</button>
+    <button id="businessAutoProfile" type="button" class="secondary-button">按已授权配置自动执行</button>
+    <button id="businessRevokeProfile" type="button" class="quiet-button">撤销自动授权</button></div>
+    <ul>${[...review.questions,...review.contract_issues.map(i=>`${i.table}.${i.field}：${i.issues.join("；")}`)].map(q=>`<li>${escapeHtml(q)}</li>`).join("")}</ul>
+    ${rules.tables.map((table,index)=>{const meta=review.tables.find(t=>t.source_name===table.source_name), metrics=[...new Set([...Object.keys(table.metrics),...meta.numeric_candidates])];
+      return `<details class="business-table" ${index===0?"open":""} data-rule-table="${index}"><summary>${escapeHtml(table.source_name)} · ${meta.rows} 条记录</summary>
+        <div class="business-fields"><label>表角色<select data-rule="role">${["fact","dimension","notes","summary"].map((v,i)=>option(v,["事实记录","唯一主数据/维度","说明备注","历史汇总"][i],table.role===v)).join("")}</select></label>
+        <label>分析日期<select data-rule="date">${option("","未指定/待确认",!table.date_field)}${meta.columns.map(c=>option(c,c,table.date_field===c)).join("")}</select></label>
+        <label>无效数值<select data-rule="invalid">${option("block","保留并阻止相关指标",table.invalid_numeric!=="exclude")}${option("exclude","隔离相关整条记录（保留排除明细）",table.invalid_numeric==="exclude")}</select></label></div>
+        <fieldset><legend>去重业务键（只删除同键且完全相同的记录；同键冲突中止）</legend>${meta.columns.map(c=>`<label><input type="checkbox" data-rule="key" value="${escapeHtml(c)}" ${table.duplicate_key.includes(c)?"checked":""}>${escapeHtml(c)}</label>`).join("")}</fieldset>
+        ${Object.entries(meta.status_values).map(([field,values])=>{const r=table.statuses[field];return `<fieldset data-status-field="${escapeHtml(field)}"><legend>${escapeHtml(field)}：范围需人工确认</legend><label>处理方式<select data-status-mode>${option("","待确认",!r)}${option("filter","精确值过滤",r?.mode==="filter")}${option("ignore","不作为经营过滤条件",r?.mode==="ignore")}</select></label>${values.map(value=>`<label>${escapeHtml(value)}<select data-status-value="${escapeHtml(value)}">${option("","待确认",!r?.valid?.includes(value)&&!r?.invalid?.includes(value))}${option("valid","纳入",r?.valid?.includes(value))}${option("invalid","排除",r?.invalid?.includes(value))}</select></label>`).join("")}</fieldset>`;}).join("")}
+        <fieldset><legend>指标（未知字段未确认时不计算；单位必须与源数据一致）</legend>${metrics.map(field=>{const m=table.metrics[field];return `<div class="business-metric" data-metric="${escapeHtml(field)}"><b>${escapeHtml(field)}</b><select data-aggregation>${option("","不覆盖/未确认",!m)}${["sum","mean","last"].map((v,i)=>option(v,["求和","算术平均","统一期末余额"][i],m?.aggregation===v)).join("")}${m?.aggregation==="weighted_ratio"?option("weighted_ratio","已配置分子/分母",true):""}</select><input data-unit maxlength="160" aria-label="${escapeHtml(field)}单位" placeholder="单位" value="${escapeHtml(m?.unit||"")}"></div>`;}).join("")}</fieldset>
+      </details>`;}).join("")}
+    <details><summary>高级规则 JSON：字段改名、标准值字典、同表加减、维度关联、需求主题</summary><p>只支持白名单规则，不支持脚本、任意公式或跨事实金额拼接。修改表单会同步覆盖 JSON。</p><textarea id="businessRulesJson" rows="12" spellcheck="false"></textarea></details>
+    <div class="business-confirm-tools"><label>保存为该客户配置（可选）<input id="businessProfileTitle" maxlength="100" placeholder="例如：月度销售口径"></label>
+    <label><input id="businessAutoGrant" type="checkbox">后续同客户、同结构、同授权主题的本地报表自动复用（可撤销）</label>
+    <div class="business-fields"><label>授权有效天数<input id="businessGrantDays" type="number" min="1" max="365" value="30"></label>
+    <label>本次及后续最大记录数<input id="businessGrantRows" type="number" min="1" max="1000000" value="${Math.max(1,review.tables.reduce((sum,t)=>sum+t.rows,0))}"></label>
+    <label>每表最大排除比例（%）<input id="businessGrantExcluded" type="number" min="0" max="100" value="0"></label></div>
+    <p>默认不授权。状态、单位、业务键或引擎变化会重新核验；不授权付款、采购、发布或人事处置。</p>
+    <label><input id="businessApproved" type="checkbox">我已核对口径，允许按规则隔离/去重；原文件保留</label>
+    <button id="businessConfirmBtn" type="button" class="run-button">确认、预演并生成报表</button></div>`;
+  $("businessRulesJson").value=JSON.stringify(rules,null,2);
+  panel.querySelectorAll("[data-rule-table] select,[data-rule-table] input").forEach(input=>input.addEventListener("change",()=>{
+    const current=JSON.parse(JSON.stringify(rules));
+    panel.querySelectorAll("[data-rule-table]").forEach(el=>{const t=current.tables[Number(el.dataset.ruleTable)];t.role=el.querySelector('[data-rule="role"]').value;t.date_field=el.querySelector('[data-rule="date"]').value;t.invalid_numeric=el.querySelector('[data-rule="invalid"]').value;t.duplicate_key=[...el.querySelectorAll('[data-rule="key"]:checked')].map(i=>i.value);t.statuses={};
+      el.querySelectorAll("[data-status-field]").forEach(s=>{const mode=s.querySelector("[data-status-mode]").value;if(!mode)return;const valid=[],invalid=[];s.querySelectorAll("[data-status-value]").forEach(v=>{if(v.value==="valid")valid.push(v.dataset.statusValue);if(v.value==="invalid")invalid.push(v.dataset.statusValue);});t.statuses[s.dataset.statusField]={mode,valid:mode==="ignore"?[]:valid,invalid:mode==="ignore"?[]:invalid};});
+      el.querySelectorAll("[data-metric]").forEach(m=>{const a=m.querySelector("[data-aggregation]").value,u=m.querySelector("[data-unit]").value;if(a)t.metrics[m.dataset.metric]={...(a==="weighted_ratio"?t.metrics[m.dataset.metric]:{}),aggregation:a,unit:u};else delete t.metrics[m.dataset.metric];});
+    });$("businessRulesJson").value=JSON.stringify(current,null,2);
+  }));
+  $("businessListProfiles").onclick=async()=>{try{const r=await post(endpoints.businessProfiles,{customer_scope:$("businessCustomer").value});$("businessProfile").innerHTML=option("","选择配置",true)+r.profiles.map(p=>option(p.profile_id,p.title+(p.automation_enabled?"（已授权，有效至 "+p.expires_at.slice(0,10)+"）":"（需核对）"),false)).join("");toast(r.message);}catch(e){toast(e.message,"error");}};
+  $("businessReuseProfile").onclick=()=>unifiedStartBusinessReview($("businessCustomer").value,$("businessProfile").value);
+  $("businessAutoProfile").onclick=()=>{if(!$("businessProfile").value)return toast("请选择已授权客户配置","error");unifiedRunCommand({customerScope:$("businessCustomer").value.trim(),profileId:$("businessProfile").value});};
+  $("businessRevokeProfile").onclick=async()=>{if(!$("businessProfile").value)return toast("请选择配置","error");if(!window.confirm("撤销该配置的后续自动执行授权？已生成的文件不删除。"))return;try{const r=await post(endpoints.businessRevoke,{customer_scope:$("businessCustomer").value.trim(),profile_id:$("businessProfile").value,confirmed:true});toast(r.message);$("businessListProfiles").click();}catch(e){toast(e.message,"error");}};
+  $("businessConfirmBtn").onclick=unifiedConfirmBusinessRules;
+}
+
+async function unifiedStartBusinessReview(customer="",profile=""){
+  unifiedSetBusy(true,"正在本机识别规则与证据缺口…");
+  try{const payload=await post(endpoints.businessReview,{prompt:$("commandInput").value.trim(),table_ids:unifiedSelectedTables().filter(id=>(state.data.tables||[]).find(t=>t.id===id)?.original),customer_scope:customer,profile_id:profile});await unifiedHandleResponse(payload);if(customer)$("businessCustomer").value=customer;}
+  catch(e){toast(e.message,"error");}finally{unifiedSetBusy(false);}
+}
+
+async function unifiedConfirmBusinessRules(){
+  if(!$("businessApproved").checked)return toast("请先核对并勾选业务规则确认","error");
+  const token=unifiedBusinessReview?.review_token;if(!token)return toast("请重新识别规则","error");
+  unifiedSetBusy(true,"正在校验确认规则并预演…");$("businessConfirmBtn").disabled=true;
+  try{const request={review_token:token,rules:JSON.parse($("businessRulesJson").value),confirmed:true,customer_scope:$("businessCustomer").value.trim(),profile_title:$("businessProfileTitle").value.trim()};if($("businessAutoGrant").checked)request.automation_limits={valid_days:Number($("businessGrantDays").value),max_rows:Number($("businessGrantRows").value),max_excluded_ratio:Number($("businessGrantExcluded").value)/100};const payload=await post(endpoints.businessConfirm,request);unifiedBusinessReview=null;await unifiedHandleResponse(payload);}
+  catch(e){toast(e.message,"error");if($("businessConfirmBtn"))$("businessConfirmBtn").disabled=false;}finally{unifiedSetBusy(false);}
+}
 
 function unifiedSelectedTables(){return [...document.querySelectorAll("#tableChips input:checked")].map(input=>input.value);}
-function unifiedSetBusy(on,message="AI 正在规划任务…"){$("runCommandBtn").disabled=on;$("confirmExecuteBtn").disabled=on;$("chartFollowupBtn").disabled=on;if(on)toast(message);}
+function unifiedSetBusy(on,message="AI 正在规划任务…"){
+  $("runCommandBtn").disabled=on;$("confirmExecuteBtn").disabled=on;$("chartFollowupBtn").disabled=on;
+  $("runCommandBtn").setAttribute("aria-busy",String(on));
+  if(on){$("runCommandBtn").textContent=message;toast(message);}
+  else $("runCommandBtn").innerHTML='执行 AI 命令 <kbd>Ctrl ↵</kbd>';
+}
 
 function unifiedRenderState(){
   const tables=state.data?.tables||[],active=state.data?.active_table;
   $("dataContext").classList.toggle("empty",!tables.length);
-  $("dataSummary").textContent=tables.length?`${tables.length} 张表 · ${tables.reduce((sum,item)=>sum+Number(item.rows||0),0).toLocaleString()} 行 · 默认全部授权给 AI` : "尚未上传文件";
-  $("tableChips").innerHTML=tables.map(item=>`<label class="table-chip"><input type="checkbox" value="${escapeHtml(item.id)}" checked>${escapeHtml(item.name)}</label>`).join("");
+  $("dataSummary").textContent=tables.length?`${tables.length} 张表 · 默认只选择原始数据，历史结果不自动作为输入` : "尚未上传文件";
+  $("tableChips").innerHTML=tables.map(item=>`<label class="table-chip"><input type="checkbox" value="${escapeHtml(item.id)}" ${item.original!==false?"checked":""}>${escapeHtml(item.name)}</label>`).join("");
   $("tableList").innerHTML=tables.length?tables.map(item=>`<button type="button" class="table-row ${item.id===active?"active":""}" data-table-id="${escapeHtml(item.id)}"><span><b>${escapeHtml(item.name)}</b><small>${escapeHtml(item.source||"本机结果")}</small></span><em>${Number(item.rows||0).toLocaleString()} 行 · ${(item.columns||[]).length} 列</em></button>`).join(""):'<div class="empty-state">上传文件后，工作表会显示在这里。</div>';
   document.querySelectorAll("[data-table-id]").forEach(button=>button.addEventListener("click",async()=>{await post(endpoints.select,{table:button.dataset.tableId});await unifiedRefresh();}));
   const current=tables.find(item=>item.id===active),preview=state.data?.preview||{};
@@ -2067,7 +2136,7 @@ async function unifiedUpload(files){
   // Omitting a fixed Chinese multipart field also avoids legacy clients
   // displaying replacement characters when no per-part charset is supplied.
   unifiedSetBusy(true,"正在读取文件与工作表…");
-  try{const result=await api(endpoints.upload,{method:"POST",body:form});unifiedPlanToken="";unifiedChartSpec=null;unifiedFollowupChart="";$("resultWorkspace").classList.add("hidden");$("chartStage").classList.add("hidden");$("commandInput").value="";$("commandInput").dispatchEvent(new Event("input"));await unifiedRefresh();toast(result.message||"已建立独立任务并导入文件","success");}
+  try{const result=await api(endpoints.upload,{method:"POST",body:form});unifiedWatchingJob="";$("autonomousPanel").classList.add("hidden");unifiedPlanToken="";unifiedChartSpec=null;unifiedFollowupChart="";$("resultWorkspace").classList.add("hidden");$("chartStage").classList.add("hidden");$("commandInput").value="";$("commandInput").dispatchEvent(new Event("input"));await unifiedRefresh();toast(result.message||"已建立独立任务并导入文件","success");}
   catch(error){toast(error.message,"error");}finally{unifiedSetBusy(false);}
 }
 
@@ -2098,10 +2167,23 @@ function unifiedRenderEngineering(payload){
   $("engineeringPanel").classList.remove("hidden");$("engineeringPanel").innerHTML=sections.join("")||'<div class="engineering-section">AI 需要更多业务信息后才能生成工程方案。</div>';
 }
 
+function unifiedRenderPartialDelivery(delivery){
+  const panel=$("partialDeliveryPanel");
+  panel.classList.add("hidden");panel.replaceChildren();
+  if(!delivery)return;
+  const url=delivery.download_url;
+  if(typeof url!=="string"||!/^\/download\/[a-f0-9]{32}$/.test(url))return;
+  panel.classList.remove("hidden");
+  panel.innerHTML=`<h3>阶段分析已生成 · 完整经营结论待核验</h3><p>${escapeHtml(delivery.message||"")}</p><p>已检查 ${escapeHtml(delivery.source_tables)} 张原始表、${escapeHtml(delivery.source_rows)} 条原始记录；${escapeHtml(delivery.review_items)} 项规则或指标口径需要核验。未确认项没有被猜测或自动执行。</p><a class="secondary-button" href="${escapeHtml(url)}" download>下载阶段分析与核验 Excel</a><p><small>这是可阅读的阶段结果，不是最终经营诊断。下方确认业务规则后可继续执行。</small></p>`;
+}
+
 async function unifiedHandleResponse(payload){
   $("planPanel").classList.add("hidden");$("engineeringPanel").classList.add("hidden");$("approvalBar").classList.add("hidden");
+  $("businessReviewPanel").classList.add("hidden");unifiedPlanToken="";
   const labels={chart:"可视化",data:"数据处理",data_then_chart:"处理 + 可视化",engineering:"工程交付",unsupported:"暂不支持"};
   const mode=payload.mode||"unknown";unifiedShowResult(labels[mode]||"AI 结果",payload.normalized_request||payload.route?.normalized_request||"AI 任务结果",payload.message||payload.route?.reason||payload.privacy);
+  unifiedRenderPartialDelivery(payload.partial_delivery);
+  if(payload.business_review){unifiedRenderBusinessReview(payload);return;}
   if(mode==="chart"){
     if(payload.status==="ready"&&payload.chart){unifiedChartSpec=payload.spec;$("chartStage").classList.remove("hidden");renderChart(payload.chart);}else{$("chartStage").classList.add("hidden");const questions=payload.clarification_questions||[];$("assistantMessage").textContent=questions.join("；")||payload.message||"请补充图表需求。";}
   }else if(mode==="engineering")unifiedRenderEngineering(payload);
@@ -2123,14 +2205,76 @@ async function unifiedHandleResponse(payload){
 async function unifiedRunCommand(options={}){
   const prompt=(options.prompt??$("commandInput").value).trim();if(prompt.length<8)return toast("请更具体地说明要完成的任务","error");
   const tableIds=options.tableIds||unifiedSelectedTables();unifiedSetBusy(true,options.modeHint==="chart"?"AI 正在修改图表…":"AI 正在理解需求并选择工具…");
-  try{const payload=await post(endpoints.aiUnified,{prompt,table_ids:tableIds,current_chart_spec:options.currentSpec??null,mode_hint:options.modeHint??null});await unifiedHandleResponse(payload);}
-  catch(error){unifiedShowResult("执行失败","AI 命令未完成",redactAiSecrets(error.message));toast(error.message,"error");}
+  try{
+    const request={prompt,table_ids:tableIds,current_chart_spec:options.currentSpec??null,mode_hint:options.modeHint??null};
+    if(options.profileId){request.profile_id=options.profileId;request.customer_scope=options.customerScope;}
+    if(options.modeHint==="chart")await unifiedHandleResponse(await post(endpoints.aiUnified,request));
+    else{
+      const submission=await post(endpoints.aiRun,request);
+      unifiedShowResult("自主交付",prompt,"任务已在本地后台运行，刷新页面后仍可查看进度。");
+      await unifiedWatchJob(submission.job,state.taskId);
+    }
+  }
+  catch(error){unifiedRenderPartialDelivery(null);unifiedShowResult("执行失败","AI 命令未完成",redactAiSecrets(error.message));toast(error.message,"error");}
   finally{unifiedSetBusy(false);}
+}
+
+let unifiedWatchingJob="";
+function unifiedRenderJob(job){
+  const panel=$("autonomousPanel");panel.classList.remove("hidden");
+  const running=["queued","running","retrying"].includes(job.status);
+  const result=job.result||{}, url=result.download_url||result.partial_delivery?.download_url;
+  const acceptance=result.task_acceptance||result.execution?.task_acceptance;
+  const safeUrl=typeof url==="string"&&/^\/download\/[a-f0-9]{32}$/.test(url);
+  const labels={queued:"等待执行",running:"后台处理中",completed:result.delivery_status==="partial"?"交付已生成，部分事项待核验":result.delivery_status==="delivered"?"交付文件已生成":result.delivery_status==="chart_ready"?"图表已生成":"需要补充或核验",failed:"执行失败",cancelled:"已取消"};
+  panel.innerHTML=`<h3>${escapeHtml(labels[job.status]||job.status)}</h3><p>${escapeHtml(running?job.message:result.message||job.error||job.message)}</p>${running?`<progress max="100" value="${Number(job.progress)||0}" aria-label="自主交付进度"></progress><span> ${Number(job.progress)||0}%</span><button class="quiet-button" id="cancelAutonomousBtn" type="button">请求取消</button>`:""}${safeUrl?`<p><a class="secondary-button" href="${escapeHtml(url)}" download>下载${result.partial_delivery?"阶段分析与核验":"已生成的 Excel"}</a></p>`:""}`;
+  if(acceptance)panel.insertAdjacentHTML("beforeend",`<details><summary>任务级验收 ${acceptance.checks_passed} / ${acceptance.checks_total} 项通过</summary><ul>${acceptance.checks.map(c=>`<li>${escapeHtml(c.item)}：${c.status==="passed"?"通过":"需核验"}${c.missing?.length?"；"+escapeHtml(c.missing.join("；")):""}</li>`).join("")}</ul><p>${escapeHtml(acceptance.boundary)}</p></details>`);
+  if(running)$("cancelAutonomousBtn").addEventListener("click",async()=>{
+    try{await post(endpoints.jobCancel,{job_id:job.job_id});toast("已请求取消；正在进行的本地计算会在安全阶段检查取消状态");}catch(error){toast(error.message,"error");}
+  });
+}
+
+async function unifiedWatchJob(initial,taskId){
+  const jobId=initial.job_id;unifiedWatchingJob=jobId;
+  let job=initial;
+  try{
+    while(state.taskId===taskId&&unifiedWatchingJob===jobId){
+      unifiedRenderJob(job);
+      if(!["queued","running","retrying"].includes(job.status)){
+        if(job.status==="completed"){
+          await unifiedHandleResponse({...job.result,auto_execute:false});
+          if(job.result.followup_chart?.status==="ready"){
+            const chart=job.result.followup_chart;unifiedChartSpec=chart.spec;
+            $("chartStage").classList.remove("hidden");renderChart(chart.chart);
+          }
+          await unifiedRefresh();unifiedRenderJob(job);
+        }
+        break;
+      }
+      await new Promise(resolve=>setTimeout(resolve,1500));
+      const jobs=await api(endpoints.jobs);
+      if(state.taskId!==taskId||unifiedWatchingJob!==jobId)break;
+      job=(jobs.jobs||[]).find(item=>item.job_id===jobId);
+      if(!job)throw new Error("任务记录不可用，请刷新后查看本任务后台记录");
+    }
+  }finally{
+    if(unifiedWatchingJob===jobId){unifiedWatchingJob="";unifiedSetBusy(false);}
+  }
+}
+
+async function unifiedRestoreDelivery(){
+  const jobs=(await api(endpoints.jobs)).jobs||[];
+  const latest=jobs.find(job=>job.job_type==="business_autopilot");
+  if(!latest)return;
+  unifiedShowResult("自主交付","本任务最近一次交付",latest.message);
+  unifiedSetBusy(["queued","running","retrying"].includes(latest.status),"正在恢复后台交付进度…");
+  // Do not block page setup until a long-running background task finishes.
+  unifiedWatchJob(latest,state.taskId).catch(error=>{toast(error.message,"error");unifiedSetBusy(false);});
 }
 
 async function unifiedExecutePlan(){
   if(!unifiedPlanToken)return;unifiedSetBusy(true,"正在本机执行已确认的处理计划…");
-  try{const result=await post(endpoints.aiExecute,{plan_token:unifiedPlanToken,confirmed:true});unifiedPlanToken="";$("approvalBar").classList.add("hidden");await unifiedRefresh();$("assistantMessage").textContent=result.download_url?`${result.message}，专业 Excel 经营报告已生成并开始下载。`:result.message;toast(result.message,"success");if(result.download_url)window.location.assign(result.download_url);
+  try{const result=await post(endpoints.aiExecute,{plan_token:unifiedPlanToken,confirmed:true});unifiedPlanToken="";$("approvalBar").classList.add("hidden");await unifiedRefresh();$("assistantMessage").textContent=result.download_url?`${result.message}，Excel 文件已生成并开始下载${result.status==="needs_review"?"；待核验项请查看报告，不代表完整经营结论。":"。"}`:result.message;toast(result.message,"success");if(result.download_url)window.location.assign(result.download_url);
     if(unifiedFollowupChart){const first=result.output_tables?.[0]?.id||state.data.active_table,prompt=unifiedFollowupChart;unifiedFollowupChart="";await unifiedRunCommand({prompt,tableIds:[first],modeHint:"chart",currentSpec:null});}
   }catch(error){toast(error.message,"error");$("assistantMessage").textContent=error.message;}finally{unifiedSetBusy(false);}
 }
@@ -2138,6 +2282,7 @@ async function unifiedExecutePlan(){
 async function unifiedExport(){const ids=(state.data?.tables||[]).map(item=>item.id);if(!ids.length)return;unifiedSetBusy(true,"正在生成专业 Excel 交付包…");try{const result=await post(endpoints.export,{tables:ids,format:"xlsx",filename:"AI_Excel_处理交付包",include_summary:true,safe_csv:true,professional:true});window.location.assign(result.download_url);toast("交付包已生成","success");}catch(error){toast(error.message,"error");}finally{unifiedSetBusy(false);}}
 
 async function unifiedClearTask(successMessage="当前任务已清空"){
+  unifiedWatchingJob="";$("autonomousPanel").classList.add("hidden");
   await post(endpoints.reset,{});unifiedPlanToken="";unifiedChartSpec=null;unifiedFollowupChart="";$('commandInput').value="";$('commandInput').dispatchEvent(new Event("input"));$('resultWorkspace').classList.add("hidden");await unifiedRefresh();toast(successMessage,"success");
 }
 
@@ -2153,12 +2298,14 @@ async function setupUnifiedUi(){
   $("commandInput").addEventListener("input",()=>{$("commandCount").textContent=`${$("commandInput").value.length} / 8000`;});$("commandInput").addEventListener("keydown",event=>{if(event.ctrlKey&&event.key==="Enter"){event.preventDefault();unifiedRunCommand();}});$("runCommandBtn").addEventListener("click",()=>unifiedRunCommand());
   document.querySelectorAll("[data-command]").forEach(button=>button.addEventListener("click",()=>{$("commandInput").value=button.dataset.command;$("commandInput").dispatchEvent(new Event("input"));$("commandInput").focus();}));
   $("confirmExecuteBtn").addEventListener("click",unifiedExecutePlan);$("chartFollowupBtn").addEventListener("click",()=>{const prompt=$("chartFollowup").value.trim();if(prompt)unifiedRunCommand({prompt,tableIds:unifiedSelectedTables(),modeHint:"chart",currentSpec:unifiedChartSpec});});$("downloadChartBtn").addEventListener("click",downloadCurrentChart);
-  $("demoBtn").addEventListener("click",async()=>{if((state.data?.tables||[]).length&&!window.confirm("加载演示数据会清空当前任务，再创建一份独立的虚构销售演示任务。是否继续？"))return;unifiedSetBusy(true,"正在新建本地演示任务…");try{await post(endpoints.demo,{});unifiedPlanToken="";unifiedChartSpec=null;unifiedFollowupChart="";$("resultWorkspace").classList.add("hidden");await unifiedRefresh();toast("演示任务已创建，仅保留一张虚构销售表","success");}catch(error){toast(error.message,"error");}finally{unifiedSetBusy(false);}});$("exportBtn").addEventListener("click",unifiedExport);
+  $("businessReviewBtn").addEventListener("click",()=>unifiedStartBusinessReview());
+  $("demoBtn").addEventListener("click",async()=>{if((state.data?.tables||[]).length&&!window.confirm("加载演示数据会清空当前任务，再创建一份独立的虚构销售演示任务。是否继续？"))return;unifiedSetBusy(true,"正在新建本地演示任务…");try{await post(endpoints.demo,{});unifiedWatchingJob="";$("autonomousPanel").classList.add("hidden");unifiedPlanToken="";unifiedChartSpec=null;unifiedFollowupChart="";$("resultWorkspace").classList.add("hidden");await unifiedRefresh();toast("演示任务已创建，仅保留一张虚构销售表","success");}catch(error){toast(error.message,"error");}finally{unifiedSetBusy(false);}});$("exportBtn").addEventListener("click",unifiedExport);
   $("clearTaskBtn").addEventListener("click",async()=>{if(!(state.data?.tables||[]).length)return toast("当前已经是空任务","success");if(!window.confirm("确定清空当前任务的全部表格、处理结果和临时文件吗？此操作无法恢复。"))return;unifiedSetBusy(true,"正在清空当前任务…");try{await unifiedClearTask();}catch(error){toast(error.message,"error");}finally{unifiedSetBusy(false);}});
   $("resetBtn").addEventListener("click",async()=>{if((state.data?.tables||[]).length&&!window.confirm("确定结束当前任务并新建空白任务吗？"))return;await unifiedClearTask("已新建空白任务");});
   $("aiConfigStatus").addEventListener("click",unifiedDiagnoseConnection);$("aiConfigStatus").addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();unifiedDiagnoseConnection();}});
   try{const config=await api(endpoints.configStatus);$("aiConfigStatus").className=`status-pill ${config.configured?"ready":"error"}`;$("aiConfigStatus").innerHTML=`<i></i>${escapeHtml(config.configured?`AI 已配置 · ${config.model}`:"AI 待配置 · 安全密钥")}`;$("modelLabel").textContent=config.configured?`${config.model} 自动判断工具与步骤`:"请运行安全配置脚本保存 DeepSeek API Key";}catch(error){$("aiConfigStatus").className="status-pill error";$("aiConfigStatus").innerHTML="<i></i>AI 配置读取失败";}
   await unifiedRefresh();
+  await unifiedRestoreDelivery();
 }
 
 function setupUi() {

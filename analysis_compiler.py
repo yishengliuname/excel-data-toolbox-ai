@@ -8,7 +8,7 @@ not require another request-specific route or report template.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -335,6 +335,8 @@ def compile_analysis(
     source_names: Sequence[str],
     user_request: str = "",
     domain_pack_path: str | os.PathLike[str] | None = None,
+    business_contexts: Mapping | None = None,
+    required_topics: Sequence[str] = (),
 ) -> CompiledAnalysisPlan:
     """Create an evidence-gated plan for any non-empty workbook structure."""
 
@@ -360,7 +362,8 @@ def compile_analysis(
     profiles: list[TableProfile] = []
     for local_index, frame in enumerate(valid_frames):
         name = valid_names[local_index]
-        sheet_role = classify_sheet_role(name, frame)
+        context = (business_contexts or {}).get(name, {})
+        sheet_role = context.get("role", classify_sheet_role(name, frame))
         metrics: list[str] = []
         dimensions: list[str] = []
         dates: list[str] = []
@@ -370,12 +373,24 @@ def compile_analysis(
             role = _column_role(column, frame[raw_column])
             concept, concept_confidence = _match_concept(column, domain["concepts"])
             semantic = classify_metric(column)
+            explicit = context.get("metrics", {}).get(column, {})
+            if explicit:
+                role = "metric"
+            elif context.get("date_field") == column:
+                role = "date"
+            elif context.get("date_field") and role == "date":
+                # Preserve the secondary date as context. It must not become
+                # a categorical rank merely because another date was approved
+                # for the operating trend (e.g. one common settlement date).
+                role = "context_date"
             components = ratio_components(column, frame.columns) if semantic.aggregation == "weighted_ratio" else None
+            if explicit.get("aggregation") == "weighted_ratio":
+                components = (explicit["numerator"], explicit["denominator"])
             fields.append(FieldBinding(
                 table_index=local_index, table_name=name, field=column, role=role,
                 concept=concept, concept_confidence=concept_confidence,
-                aggregation=semantic.aggregation if role == "metric" else "none",
-                unit=semantic.unit, numerator=components[0] if components else "",
+                aggregation=explicit.get("aggregation", semantic.aggregation) if role == "metric" else "none",
+                unit=explicit.get("unit", semantic.unit), numerator=components[0] if components else "",
                 denominator=components[1] if components else "",
             ))
             if role == "metric": metrics.append(column)
@@ -389,7 +404,7 @@ def compile_analysis(
         if sheet_role == "summary": score -= 600
         elif sheet_role == "notes": score -= 350
         elif sheet_role == "dimension": score -= 35
-        grain = candidate_grain(frame)
+        grain = tuple(context.get("grain", ())) or candidate_grain(frame)
         profiles.append(TableProfile(
             index=local_index, name=name, role=sheet_role, row_count=len(frame), column_count=frame.shape[1],
             fact_score=score, grain=grain, metrics=tuple(metrics), dimensions=tuple(dimensions),
@@ -405,7 +420,7 @@ def compile_analysis(
     dimension_bindings = [field for field in primary_fields if field.role == "dimension"]
     date_bindings = [field for field in primary_fields if field.role == "date"]
     identifier_bindings = [field for field in primary_fields if field.role == "identifier"]
-    topics = _intent_topics(user_request)
+    topics = tuple(dict.fromkeys([*_intent_topics(user_request), *required_topics]))
     fact_fields = [field for field in fields if field.table_index in fact_indices]
     fact_metric_bindings = sorted(
         (field for field in fact_fields if field.role == "metric"),
@@ -415,11 +430,33 @@ def compile_analysis(
     fact_date_bindings = [field for field in fact_fields if field.role == "date"]
 
     capabilities = {"overview", "quality", "anomaly"}
-    contracts = tuple(metric_contract(field.table_index, field.table_name, valid_frames[field.table_index], field.field)
+    contracts = tuple(metric_contract(field.table_index, field.table_name, valid_frames[field.table_index], field.field,
+                      context=(business_contexts or {}).get(field.table_name))
                       for field in fact_metric_bindings)
+    units = {(c.table_index, c.field): c.unit for c in contracts}
+    fields = [replace(f, unit=units[(f.table_index, f.field)])
+              if (f.table_index, f.field) in units else f for f in fields]
+    fact_metric_bindings = [replace(f, unit=units[(f.table_index, f.field)]) for f in fact_metric_bindings]
     safe_pairs = {(c.table_index, c.field) for c in contracts if c.status != "unavailable"}
     safe_bindings = [f for f in fact_metric_bindings if (f.table_index, f.field) in safe_pairs]
     edges = relationship_graph(valid_frames, valid_names, [profile.role for profile in profiles])
+    # Include actually approved attribute joins even when the two key headers
+    # differ. Inferred candidates remain distinct from confirmed execution.
+    confirmed_edges = []
+    for left_index, name in enumerate(valid_names):
+        for join in (business_contexts or {}).get(name, {}).get("confirmed_joins", []):
+            right_index = valid_names.index(join["right"])
+            left_values = valid_frames[left_index][join["left_key"]].astype("string").str.strip()
+            right_values = valid_frames[right_index][join["right_key"]].astype("string").str.strip()
+            used = set(left_values)
+            confirmed_edges.append(RelationshipContract(left_index, right_index, name, join["right"],
+                join["left_key"], join["right_key"], "many_to_one", 1.0,
+                float(right_values.isin(used).mean()), 1.0, len(used) / len(set(right_values)),
+                "confirmed", "人工确认的维度属性关联已执行；事实行数不变，未复制/分摊度量"))
+    if confirmed_edges:
+        declared = {(e.left_table, e.right_table, e.left_key, e.right_key) for e in confirmed_edges}
+        edges = tuple(e for e in edges if (e.left_table, e.right_table, e.left_key, e.right_key) not in declared
+                      and (e.right_table, e.left_table, e.right_key, e.left_key) not in declared) + tuple(confirmed_edges)
     questions = question_evidence(topics, contracts, edges,
         {profile.index: (*profile.dimensions, *profile.identifiers) for profile in profiles})
     if any(profile.dimensions and any(f.table_index == profile.index for f in safe_bindings) for profile in profiles):

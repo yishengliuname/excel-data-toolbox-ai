@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import datetime
 import json
 import math
 import os
@@ -323,7 +324,7 @@ _PERCENT_HEADER = re.compile(
     r"差异率|增长率|利润率|毛利率|净利率|资产负债率|收益率|ROA|ROE|占比|百分比|margin|percentage",
     re.IGNORECASE,
 )
-_INTEGER_HEADER = re.compile(r"排名|订单数|记录数|数量|件数|count|rank", re.IGNORECASE)
+_INTEGER_HEADER = re.compile(r"排名|订单数|记录数|对象数|数量|件数|count|rank", re.IGNORECASE)
 _MULTIPLE_HEADER = re.compile(
     r"流动比率|速动比率|现金比率|周转率|倍数|multiple|turnover",
     re.IGNORECASE,
@@ -487,7 +488,7 @@ def _finalize_adaptive_layout(worksheet: Any, *, header_row: int) -> None:
             vertical="center",
             wrap_text=True,
         )
-    if worksheet.title == "经营诊断看板":
+    if worksheet.title == "经营诊断看板" or (worksheet.title == "经营图表" and header_row == 40):
         return
 
     sample_end = min(worksheet.max_row, header_row + 500)
@@ -2125,7 +2126,7 @@ def _add_adaptive_management_charts(worksheet: Any, *, header_row: int) -> None:
             chart = BarChart()
             chart.type = "bar"
             chart.title = f"{label('排名来源')}：{label('排名口径')}排名" if label("排名来源") else "首要分类指标排名"
-            chart.x_axis.title = "指标值"
+            chart.x_axis.title = f"指标值（{label('排名单位')}）" if label("排名单位") else "指标值"
             chart.y_axis.title = "分类"
             chart.height = 8.0
             chart.width = 13.8
@@ -2147,7 +2148,7 @@ def _add_adaptive_management_charts(worksheet: Any, *, header_row: int) -> None:
         if end > header_row:
             chart = LineChart()
             chart.title = f"{label('趋势来源')}：时间趋势" if label("趋势来源") else "核心指标时间趋势"
-            chart.y_axis.title = "指标值"
+            chart.y_axis.title = f"指标值（{label('趋势单位')}）" if label("趋势单位") else "指标值"
             chart.x_axis.title = "月份"
             chart.height = 7.2
             chart.width = 13.8
@@ -3237,6 +3238,108 @@ def _add_enterprise_management_charts(worksheet: Any, *, header_row: int) -> Non
             worksheet.add_chart(chart, "H43")
 
 
+def _style_declared_multifact_sheet(worksheet: Any, *, header_row: int) -> None:
+    """Compact views for declared-policy facts; no decorative raw attributes."""
+    worksheet.sheet_view.showGridLines = False
+    worksheet.sheet_view.zoomScale = 90
+    worksheet.sheet_properties.pageSetUpPr.fitToPage = True
+    worksheet.page_setup.orientation = "landscape"
+    worksheet.page_setup.paperSize = worksheet.PAPERSIZE_A3
+    worksheet.page_setup.fitToWidth = 1
+    worksheet.page_setup.fitToHeight = 0
+    worksheet.print_title_rows = f"{header_row}:{header_row}"
+    if header_row > 1:
+        worksheet.cell(2, 1, worksheet.title).font = Font(name="微软雅黑", size=14, bold=True, color="17324D")
+    headers = {str(c.value or ""): c.column for c in worksheet[header_row]}
+    for header, col in headers.items():
+        width = 18
+        if any(t in header for t in ("原因", "证据", "说明", "边界", "口径", "建议", "验收指标")):
+            width = 46
+        elif header == '原记录':
+            width = 76
+        elif header in ('指标', '问题', '商品名称', '来源表', '商品', '客户', '事项'):
+            width = 28
+        elif any(t in header for t in ('数量', '金额', '贡献', '毛利', '销售', '成本', '应收', '费用', '核销')):
+            width = 22
+        worksheet.column_dimensions[get_column_letter(col)].width = width
+        for row in range(header_row + 1, worksheet.max_row + 1):
+            cell = worksheet.cell(row, col)
+            if isinstance(cell.value, (float, int)) and not isinstance(cell.value, bool):
+                cell.number_format = "0.0%" if '率' in header or '占净销售' in header else '#,##0.00;[Red](#,##0.00);0.00'
+                if header in ('行号', '原行号', '版本号', '源行号', '记录数', '字段数', '输入行', '输出行', '排除行', '月末人数', '期末人数'):
+                    cell.number_format = '0'
+                cell.alignment = Alignment(horizontal='right', vertical='center')
+            elif isinstance(cell.value, datetime):
+                cell.number_format = 'yyyy-mm' if '月份' in header else 'yyyy-mm-dd'
+                cell.alignment = Alignment(horizontal='left', vertical='center')
+    if worksheet.title == '管理层通用总览':
+        for row in range(header_row + 1, worksheet.max_row + 1):
+            unit = worksheet.cell(row, 3).value
+            worksheet.cell(row, 2).number_format = '0.0%' if unit == '%' else '#,##0' if unit in ('人', '笔', '行', '组') else '#,##0.00;[Red](#,##0.00);0.00'
+        worksheet.column_dimensions['A'].width = 30
+        worksheet.column_dimensions['B'].width = 34
+        worksheet.column_dimensions['C'].width = 10
+        worksheet.column_dimensions['D'].width = 68
+    if worksheet.title == '经营结论摘要':
+        for col in range(1, 5):
+            worksheet.column_dimensions[get_column_letter(col)].width = 18 if col == 1 else 48
+        for row in worksheet.iter_rows(min_row=header_row + 1):
+            for cell in row:
+                cell.alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
+        # The common pass will expand where needed; remove the generic
+        # pre-style's height estimate based on the old column widths.
+        for row in range(header_row + 1, worksheet.max_row + 1):
+            worksheet.row_dimensions[row].height = 24
+    if worksheet.title != '经营图表':
+        return
+    worksheet.freeze_panes = None
+    worksheet.sheet_view.zoomScale = 85
+    for col in range(1, 20):
+        worksheet.column_dimensions[get_column_letter(col)].width = 10.5
+    # The compact chart canvas is also the helper-data grid. Show whole yuan
+    # here (full cents remain in the analysis sheets) to avoid #### in Excel.
+    for row in worksheet.iter_rows(min_row=header_row + 1):
+        for cell in row:
+            if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
+                cell.number_format = '0.0%' if '率' in str(worksheet.cell(header_row, cell.column).value) else '#,##0;[Red](#,##0);0'
+    for row in range(1, header_row):
+        worksheet.row_dimensions[row].height = 22
+    chart_specs = (
+        ('line', '净销售与标准毛利趋势（元）', '月份', ('净销售', '标准毛利'), 'A4'),
+        ('line', '已知管理贡献趋势（元）', '月份', ('管理贡献',), 'K4'),
+        ('bar', '组织净销售与分摊前贡献（元）', '组织', ('组织净销售', '组织分摊前贡献'), 'A21'),
+        ('bar', '商品净销售（元）', '商品', ('商品净销售',), 'K21'),
+    )
+    for kind, title, label, values, anchor in chart_specs:
+        end = _last_data_row(worksheet, headers[label], header_row=header_row)
+        if end <= header_row or (kind == 'line' and end - header_row < 2):
+            continue
+        chart = LineChart() if kind == 'line' else BarChart()
+        if kind == 'bar':
+            chart.type = 'bar'
+            chart.gapWidth = 55
+        chart.title, chart.width, chart.height = title, 15.2, 8
+        chart.style = 2
+        chart.legend = None if len(values) == 1 else chart.legend
+        if chart.legend:
+            chart.legend.position = 'b'
+        chart.y_axis.numFmt = '#,##0'
+        chart.x_axis.numFmt = '#,##0' if kind == 'bar' else '@'
+        if kind == 'bar':
+            chart.x_axis.scaling.min = 0
+        chart.x_axis.majorGridlines = None
+        chart.y_axis.majorGridlines = None
+        for metric, color in zip(values, ('2F75B5', '00A389')):
+            chart.add_data(Reference(worksheet, min_col=headers[metric], min_row=header_row, max_row=end), titles_from_data=True)
+            chart.series[-1].tx = SeriesLabel(v=metric)
+            if kind == 'line':
+                _style_line_series(chart.series[-1], color)
+            else:
+                chart.series[-1].graphicalProperties.solidFill = color
+        chart.set_categories(Reference(worksheet, min_col=headers[label], min_row=header_row + 1, max_row=end))
+        worksheet.add_chart(chart, anchor)
+
+
 def _write_xlsx(
     tables: Mapping[str, pd.DataFrame],
     destination: Path,
@@ -3257,7 +3360,10 @@ def _write_xlsx(
         with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
             for table_name, frame in tables.items():
                 sheet_name = _unique_sheet_name(table_name, used)
-                if sheet_name == "经营诊断看板":
+                declared_report = frame.attrs.get('toolbox_report_kind') == 'declared_multifact_report'
+                if declared_report:
+                    start_row = 39 if sheet_name == '经营图表' else 3
+                elif sheet_name == "经营诊断看板":
                     # Keep helper data below the visible 1:58 dashboard canvas
                     # so chart anchors remain stable in Excel and WPS.
                     start_row = 64
@@ -3305,7 +3411,9 @@ def _write_xlsx(
                     long_text_detail=sheet_name in {"长文本明细", "空值清单"},
                     header_row=header_row,
                 )
-                if sheet_name == "数据源确认":
+                if declared_report:
+                    _style_declared_multifact_sheet(worksheet, header_row=header_row)
+                elif sheet_name == "数据源确认":
                     _style_source_confirmation_sheet(worksheet, header_row=header_row)
                 elif enterprise_report and sheet_name in _ENTERPRISE_REPORT_SHEETS:
                     _style_enterprise_management_sheet(worksheet, header_row=header_row)

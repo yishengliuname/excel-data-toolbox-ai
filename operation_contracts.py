@@ -270,7 +270,7 @@ PARAM_KEYS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = MappingProxyTy
         ),
         "adaptive_analysis_report": (
             frozenset({"source_names"}),
-            frozenset({"source_names", "user_request", "top_n", "outlier_multiplier"}),
+            frozenset({"source_names", "user_request", "top_n", "outlier_multiplier", "business_rules"}),
         ),
         "customer_order_analysis": (
             frozenset({"source_names"}),

@@ -115,6 +115,10 @@ Understanding and execution are deliberately separated. The optional model produ
 - Formula-injection protection, per-task storage, undo/redo, and output re-open validation.
 - Reusable recipes, data-quality rules, processing lineage, and auditable delivery notes.
 
+For unfamiliar workbooks, **通用规则分析** (business-rule review) lets you confirm status filters, dates, duplicate keys, units, and custom metrics, then reuse a customer-scoped local profile. See the [rule workflow and boundaries](docs/BUSINESS_RULE_WORKFLOW.md); it does not automatically resolve arbitrary business policies.
+
+The unified UI supports [bounded background delivery](docs/AUTONOMOUS_DELIVERY.md): submit a goal, follow progress, reload to retrieve the result, and download the actual workbook. Unconfirmed rules and partial conclusions remain explicit; this is not an agent that can perform every business task.
+
 ## Advanced capabilities
 
 These capabilities are available when the workbook and installed dependencies provide enough evidence:

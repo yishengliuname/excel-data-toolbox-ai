@@ -135,8 +135,12 @@ class AdaptiveReportTests(unittest.TestCase):
             ):
                 response = handler._ai_unified({"prompt": prompt, "table_ids": ids})
             self.assertEqual(response["mode"], "data")
-            self.assertTrue(response["auto_execute"])
-            self.assertEqual(response["plan"]["steps"][0]["operation"], "adaptive_analysis_report")
+            # Budget semantics/unknown metrics now require explicit confirmation,
+            # rather than producing a report whose numeric claims are blocked.
+            self.assertFalse(response["auto_execute"])
+            self.assertEqual(response["status"], "clarification")
+            self.assertIn("business_review", response)
+            self.assertNotIn("plan_token", response)
         finally:
             session.close()
 

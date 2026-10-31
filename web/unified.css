@@ -10,3 +10,18 @@
 @media(max-width:980px){.command-workspace{padding:42px 28px;grid-template-columns:1fr;gap:35px}.hero-copy h1{font-size:37px}.context-grid{grid-template-columns:1fr}.top-status .status-pill:first-child{display:none}}@media(max-width:620px){.app-shell{width:min(100% - 18px,1280px)}.topbar{height:auto;padding:14px 0}.top-status{flex-wrap:wrap;justify-content:flex-end}.command-workspace{padding:28px 16px;border-radius:20px}.hero-copy h1{font-size:31px}.upload-strip,.command-footer,.approval-bar{align-items:stretch;flex-direction:column}.context-heading{align-items:stretch;flex-direction:column}.context-heading>div:last-child{display:grid;grid-template-columns:1fr 1fr}}
 .chart-canvas .chart-svg{height:var(--chart-height,315px)}
 .chart-canvas .chart-svg text{font-size:var(--chart-font-size,9px)}
+/* Business policy confirmation: responsive, scrollable and keyboard-native. */
+.business-review{background:#f7faf9;border:1px solid #c9ded5;border-radius:16px;padding:24px;margin:18px 0;overflow-wrap:anywhere}
+.business-review h3{margin-top:0}.business-review p,.business-review li{line-height:1.6}
+.business-table{background:white;border:1px solid #dce7e2;border-radius:10px;padding:16px;margin:12px 0}
+.business-table summary{cursor:pointer;font-weight:700}.business-table fieldset{border:1px solid #dce7e2;margin:14px 0;padding:12px;display:flex;gap:12px;flex-wrap:wrap}
+.business-fields,.business-profile-tools,.business-confirm-tools{display:flex;gap:16px;flex-wrap:wrap;margin:16px 0;align-items:center}
+.business-review label{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.business-review select,.business-review input:not([type=checkbox]){max-width:100%;padding:8px;border:1px solid #bdcec6;border-radius:6px;background:white}
+.business-metric{display:flex;gap:8px;flex-wrap:wrap;align-items:center;flex:1 1 420px}.business-metric b{min-width:130px}
+.business-review textarea{box-sizing:border-box;width:100%;font-family:monospace;padding:12px;line-height:1.5}
+#autonomousPanel{padding:20px;border:1px solid #c9ded5;border-radius:14px;background:#f7faf9;margin:18px 0;overflow-wrap:anywhere}
+#autonomousPanel h3{margin-top:0}#autonomousPanel p{line-height:1.7}
+#autonomousPanel progress{width:min(420px,70%);height:12px;accent-color:var(--green);vertical-align:middle}
+#autonomousPanel button{margin-left:14px}#autonomousPanel a{display:inline-block;text-decoration:none}
+@media(max-width:700px){.business-review{padding:14px}.business-profile-tools,.business-confirm-tools{align-items:stretch;flex-direction:column}}

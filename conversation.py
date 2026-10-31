@@ -134,6 +134,11 @@ class ConversationStore:
             raise ValueError("需求不能为空")
         context = self.context()
         previous = str(context.get("last_request") or "")
+        # Repeating a complete request is a retry, not an instruction to nest
+        # the previous request. Broad words such as "再" also occur inside
+        # full specifications ("不要再扣费"); do not inherit old rules there.
+        if prompt == previous or (len(prompt) > 256 and not re.match(r"^(?:请)?(?:沿用|继续|在(?:刚才|上次|上一轮))", prompt)):
+            return prompt, False
         is_followup = bool(previous and (_FOLLOWUP_HINT.search(prompt) or len(prompt) <= 32))
         if not is_followup:
             return prompt, False

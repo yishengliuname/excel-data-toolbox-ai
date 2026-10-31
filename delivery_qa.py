@@ -67,6 +67,11 @@ def _normalise_scalar(value: Any) -> Any:
         if len(value) > 1 and value[0] == "'" and value[1] in FORMULA_PREFIXES:
             value = value[1:]
     if isinstance(value, (pd.Timestamp, datetime)):
+        # pandas.NaT is also datetime-like. Check absence before isoformat;
+        # otherwise a legitimate blank date is fingerprinted as literal "NaT"
+        # while Excel correctly reopens it as an empty cell.
+        if pd.isna(value):
+            return None
         return value.isoformat()
     if isinstance(value, bool):
         return value

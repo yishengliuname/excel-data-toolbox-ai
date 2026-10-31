@@ -13,7 +13,7 @@ from typing import Mapping, Sequence
 
 import pandas as pd
 
-from .metric_semantics import aggregate_metric, classify_metric, normalise, ratio_components
+from .metric_semantics import classify_metric, normalise, ratio_components
 
 
 @dataclass(frozen=True)
@@ -64,7 +64,7 @@ class QuestionEvidence:
     conclusion_boundary: str
 
 
-def numeric_values(series: pd.Series) -> pd.Series:
+def numeric_values(series: pd.Series, *, allow_percent: bool = True) -> pd.Series:
     """Parse notation, not currencies or physical-unit conversions."""
     if pd.api.types.is_bool_dtype(series.dtype):
         return pd.Series(float("nan"), index=series.index)
@@ -72,9 +72,84 @@ def numeric_values(series: pd.Series) -> pd.Series:
         return pd.to_numeric(series, errors="coerce")
     raw = series.astype("string").str.strip()
     percent = raw.str.contains(r"[%％]", na=False)
+    notation = raw.str.replace(r"[,，\s]", "", regex=True)
+    valid_percent = notation.str.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)[%％]", na=False)
     clean = raw.str.replace(r"[¥￥,，%％\s]", "", regex=True)
-    values = pd.to_numeric(clean, errors="coerce")
+    # Nullable integer arrays cannot hold 10 / 100. Cast before assignment,
+    # not after it. Keep malformed notation missing rather than stripping it
+    # into a plausible number (e.g. "1%2" must not become 0.12).
+    values = pd.to_numeric(clean, errors="coerce").astype("Float64")
+    values = values.mask(percent & (~valid_percent | (not allow_percent)))
     return values.where(~percent, values / 100.0)
+
+
+_CURRENCY_ALIASES = {
+    "CNY": "CNY", "RMB": "CNY", "人民币": "CNY", "人民币元": "CNY", "元": "CNY",
+    "USD": "USD", "美元": "USD", "美金": "USD",
+    "EUR": "EUR", "欧元": "EUR", "HKD": "HKD", "港币": "HKD", "港元": "HKD",
+    "JPY": "JPY", "日元": "JPY", "GBP": "GBP", "英镑": "GBP",
+    "AUD": "AUD", "澳元": "AUD", "CAD": "CAD", "加元": "CAD",
+}
+_CURRENCY_FIELD = re.compile(
+    r"(?<![A-Za-z])(?:CNY|RMB|USD|EUR|HKD|JPY|GBP|AUD|CAD)(?![A-Za-z])|"
+    r"人民币|美元|美金|欧元|港币|港元|日元|英镑|澳元|加元", re.I,
+)
+MONEY_UNITS = frozenset({"元", "万元", "千元", *_CURRENCY_ALIASES.values()})
+
+
+def _money_unit(frame: pd.DataFrame, field: str, *, monetary: bool = False) -> tuple[str, list[str]]:
+    """Resolve declared currency without exchange rates or changing amounts.
+
+    Only table-wide or this metric's currency declarations apply. A purchase
+    currency must not silently label an unrelated sales measure.
+    """
+    semantic = classify_metric(field)
+    unit = "万元" if "万元" in field else "千元" if "千元" in field else semantic.unit
+    if semantic.kind not in {"additive", "balance"} and not monetary:
+        return unit, []
+    currencies: set[str] = set()
+    issues: list[str] = []
+    declarations = {"币种", "货币", "币别", "currency", "currencycode", "货币代码"}
+    declarations.update(normalise(field) + suffix for suffix in ("币种", "货币", "currency", "currencycode"))
+    for column in frame:
+        if normalise(column) not in declarations:
+            continue
+        tokens = frame[column].astype("string").str.strip().str.upper()
+        if tokens.isna().any() or tokens.eq("").any():
+            issues.append("币种声明缺失；须确认金额币种")
+        for token in tokens.dropna().unique():
+            if not token:
+                continue
+            currency = _CURRENCY_ALIASES.get(token)
+            if currency:
+                currencies.add(currency)
+            else:
+                issues.append("币种声明无法识别；须确认金额币种")
+    for match in _CURRENCY_FIELD.finditer(field):
+        currencies.add(_CURRENCY_ALIASES[match.group().upper()])
+    # Explicit (元)/(万元)/(千元) is a declaration, not a default guess.
+    if re.search(r"[（(]\s*(?:万|千)?元\s*[)）]|万元|千元", field):
+        currencies.add("CNY")
+    raw = frame[field].astype("string")
+    if raw.str.contains("￥", na=False).any():
+        currencies.add("CNY")
+    if raw.str.contains("¥", na=False).any():
+        if not currencies:
+            currencies.add("CNY")  # existing RMB-format interpretation
+        elif not currencies.issubset({"CNY", "JPY"}):
+            issues.append("金额符号与币种声明冲突；须人工核验")
+    if len(currencies) > 1:
+        issues.append("存在多币种或币种声明冲突；缺少统一换算规则")
+        return "币种待确认", list(dict.fromkeys(issues))
+    if currencies:
+        currency = next(iter(currencies))
+        if currency != "CNY":
+            unit = currency
+        elif not unit or unit not in {"万元", "千元"}:
+            unit = "元"
+    elif issues:
+        unit = "币种待确认"
+    return unit, list(dict.fromkeys(issues))
 
 
 def candidate_grain(frame: pd.DataFrame) -> tuple[str, ...]:
@@ -93,24 +168,37 @@ def candidate_grain(frame: pd.DataFrame) -> tuple[str, ...]:
     return ()
 
 
-def metric_contract(index: int, name: str, frame: pd.DataFrame, field: str) -> MetricContract:
+def metric_contract(index: int, name: str, frame: pd.DataFrame, field: str, *, context: Mapping | None = None) -> MetricContract:
+    context = context or {}
+    explicit = context.get("metrics", {}).get(field, {})
     semantic = classify_metric(field)
-    values = numeric_values(frame[field])
+    aggregation = explicit.get("aggregation", semantic.aggregation)
+    is_ratio = aggregation == "weighted_ratio"
+    values = numeric_values(frame[field], allow_percent=is_ratio)
     valid = values.notna() & values.map(lambda v: math.isfinite(float(v)) if pd.notna(v) else False)
     dates = [str(c) for c in frame if classify_metric(c).kind == "date"]
-    date = dates[0] if len(dates) == 1 else ""
+    date = context.get("date_field", "") or (dates[0] if len(dates) == 1 else "")
     issues = []
-    if semantic.aggregation in {"none", "unknown"}:
+    if aggregation in {"none", "unknown"}:
         issues.append("业务聚合语义未确认")
     if frame.duplicated().any():
         issues.append("发现完全重复记录；需确认业务键及去重规则，原记录保留")
-    if any(re.search(r"币种|currency|数量单位|计量单位|采购单位", str(c), re.I) and
+    if any(re.search(r"数量单位|计量单位|采购单位", str(c), re.I) and
            (frame[c].isna().any() or frame[c].astype("string").str.strip().eq("").any() or
             frame[c].dropna().astype("string").str.strip().nunique() > 1) for c in frame):
         issues.append("存在多币种或多计量单位；缺少统一换算规则")
+    if not is_ratio and (re.search(r"[%％]", field) or
+            frame[field].astype("string").str.contains(r"[%％]", na=False).any()):
+        issues.append("非比例字段出现百分号；单位冲突，禁止作为金额、数量或评分计算")
+    unit, currency_issues = _money_unit(frame, field, monetary=explicit.get("unit") in MONEY_UNITS)
+    issues.extend(currency_issues)
+    if explicit:
+        if unit and (semantic.kind in {"additive", "balance"} or explicit["unit"] in MONEY_UNITS) and unit != explicit["unit"]:
+            issues.append("确认单位与源金额声明不一致；规则不能执行隐式换算")
+        unit = explicit["unit"]
     if int(valid.sum()) != len(frame):
         issues.append("存在缺失、不可解析或非有限数值；不按零填补")
-    if len(dates) > 1:
+    if len(dates) > 1 and not context.get("date_field"):
         issues.append("存在多个时间字段；须确认发生月或订单归属月")
     if dates and not date:
         time_basis = "待确认"
@@ -120,35 +208,47 @@ def metric_contract(index: int, name: str, frame: pd.DataFrame, field: str) -> M
         time_basis = "未提供期间"
     if date and pd.to_datetime(frame[date], errors="coerce", format="mixed").isna().any():
         issues.append("时间字段存在缺失或无效日期")
-    components = ratio_components(field, frame.columns) if semantic.aggregation == "weighted_ratio" else None
-    if semantic.aggregation == "weighted_ratio":
+    components = ((explicit["numerator"], explicit["denominator"]) if explicit and is_ratio
+                  else ratio_components(field, frame.columns) if is_ratio else None)
+    if components and any(c not in frame for c in components):
+        issues.append("比例规则引用的分子或分母不存在")
+        components = None
+    if is_ratio:
         if components is None:
             issues.append("缺少唯一可确认的分子与分母")
-        elif frame[list(components)].apply(numeric_values).isna().any(axis=None):
+        elif frame[list(components)].apply(lambda s: numeric_values(s, allow_percent=False)).isna().any(axis=None):
             issues.append("分子分母样本不完整，禁止使用不同样本计算比例")
         else:
-            component_values = frame[list(components)].apply(numeric_values)
-            scales = ["万元" if "万元" in c else "千元" if "千元" in c else "元" for c in components]
-            if len(set(scales)) > 1:
-                issues.append("分子分母单位数量级不同，须确认换算后才能计算比例")
+            component_values = frame[list(components)].apply(lambda s: numeric_values(s, allow_percent=False))
+            component_units = [_money_unit(frame, c, monetary=context.get("metrics", {}).get(c, {}).get("unit") in MONEY_UNITS)
+                               for c in components]
+            for position, component in enumerate(components):
+                declared = context.get("metrics", {}).get(component)
+                if declared:
+                    inferred, problems = component_units[position]
+                    if inferred and inferred != declared["unit"]:
+                        issues.append("比例分子/分母确认单位与源声明不一致")
+                    if declared["aggregation"] != "sum":
+                        issues.append("比例分子分母必须是同样本的可加度量")
+                    component_units[position] = (declared["unit"], problems)
+            issues.extend(issue for _, problems in component_units for issue in problems)
+            if len({u for u, _ in component_units}) > 1:
+                issues.append("分子分母币种或单位数量级不同，须确认换算后才能计算比例")
             if not component_values.map(lambda x: math.isfinite(float(x))).all(axis=None):
                 issues.append("分子分母包含非有限数值")
             elif float(component_values[components[1]].sum()) <= 0:
                 issues.append("分母合计非正，比例无可解释口径")
-    if semantic.aggregation == "last" and not date:
+    if aggregation == "last" and not date:
         issues.append("余额缺少唯一时间字段，无法确定期末")
     # Unit values must not be accumulated like transactions.
-    if re.search(r"单价|平均|周转天数|库存天数|每单|每人|unit.?price|average|per.?unit", field, re.I):
+    if (not explicit or aggregation == "sum") and re.search(r"单价|平均|周转天数|库存天数|每单|每人|unit.?price|average|per.?unit", field, re.I):
         issues.append("单价/平均/效率指标需要权重或专门公式，禁止直接求和")
-    if re.search(r"USD|EUR|美元|欧元|港币", field, re.I):
-        issues.append("外币字段需要明确币种与换算规则，不默认人民币")
-    status = "unavailable" if issues else "inferred"
-    population = "全部源记录（状态规则未提供）"
-    if any(re.search(r"状态|status", str(c), re.I) for c in frame):
+    status = "unavailable" if issues else "confirmed" if explicit else "inferred"
+    population = context.get("population", "全部源记录（状态规则未提供）")
+    if not context.get("status_confirmed") and any(re.search(r"状态|status", str(c), re.I) for c in frame):
         population = "全部源记录；正常经营范围待确认状态规则"
         issues.append("包含状态字段，需确认有效记录范围；未自动过滤")
         status = "unavailable"
-    unit = "万元" if "万元" in field else "千元" if "千元" in field else semantic.unit
     if not unit:
         if semantic.kind == "additive":
             unit = "金额单位未声明"
@@ -156,10 +256,11 @@ def metric_contract(index: int, name: str, frame: pd.DataFrame, field: str) -> M
             unit = "小时" if re.search(r"小时|工时|hours", field, re.I) else "天" if re.search(r"天数|days", field, re.I) else "数量单位未声明"
         elif semantic.kind == "balance":
             unit = "余额单位未声明"
-    contract = MetricContract(index, name, field, semantic.aggregation, unit,
-                          candidate_grain(frame), date, time_basis,
+    contract = MetricContract(index, name, field, aggregation, unit,
+                          tuple(context.get("grain", ())) or candidate_grain(frame), date, time_basis,
                           components[0] if components else "", components[1] if components else "",
-                          population, int(valid.sum()), len(frame), status, tuple(issues))
+                          population, int(valid.sum()), len(frame), status, tuple(issues),
+                          origin="confirmed_business_rules" if context else "local_inference")
     if contract.status != "unavailable" and contract.aggregation == "last":
         value, reason = evaluate_metric(frame, contract)
         if not math.isfinite(value):
@@ -183,13 +284,21 @@ def evaluate_metric(frame: pd.DataFrame, contract: MetricContract) -> tuple[floa
                 return float("nan"), "最新时点未覆盖全部实体，禁止混合不同日期的余额"
         elif len(latest) != 1:
             return float("nan"), "期末存在多条记录但缺少实体键，禁止选最后一行"
-        return float(numeric_values(latest[contract.field]).sum(min_count=1)), "统一最新时点的实体余额合计"
+        return float(numeric_values(latest[contract.field], allow_percent=False).sum(min_count=1)), "统一最新时点的实体余额合计"
     work = frame.copy(deep=True)
     for column in (contract.field, contract.numerator, contract.denominator):
         if column:
-            work[column] = numeric_values(work[column])
-    value, method, _ = aggregate_metric(work, contract.field)
-    return value, method
+            work[column] = numeric_values(work[column], allow_percent=column == contract.field and contract.aggregation == "weighted_ratio")
+    if contract.aggregation == "sum":
+        return float(work[contract.field].sum(min_count=1)), "按契约求和"
+    if contract.aggregation == "mean":
+        return float(work[contract.field].mean()), "按契约算术平均（非加权）"
+    if contract.aggregation == "weighted_ratio":
+        denominator = float(work[contract.denominator].sum(min_count=1))
+        if not math.isfinite(denominator) or denominator <= 0:
+            return float("nan"), "比例分母非正或无效"
+        return float(work[contract.numerator].sum(min_count=1)) / denominator, "按契约分子合计 ÷ 分母合计"
+    return float("nan"), "未支持的契约聚合方式"
 
 
 def relationship_graph(frames: Sequence[pd.DataFrame], names: Sequence[str], roles: Sequence[str]) -> tuple[RelationshipContract, ...]:

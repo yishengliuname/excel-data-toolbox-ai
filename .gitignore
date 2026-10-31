@@ -13,6 +13,7 @@ service-account*.json
 
 # Customer data and generated deliverables (never commit by default)
 user_data/
+.business_profiles/
 outputs/
 acceptance_reports/
 releases/

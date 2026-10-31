@@ -106,9 +106,15 @@ class PersistentJobEngine:
                 cancel_requested INTEGER NOT NULL)"""
             )
             connection.execute("CREATE INDEX IF NOT EXISTS idx_jobs_task_created ON jobs(task_id, created_at DESC)")
+            columns = {row[1] for row in connection.execute('PRAGMA table_info(jobs)')}
+            if 'idempotency_key' not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''")
 
     def _recover(self) -> None:
         with self._connect() as connection:
+            # Replaying a partially committed business delivery can duplicate
+            # tables or replace files. Leave it for checkpoint reconciliation.
+            connection.execute("UPDATE jobs SET status='failed', message='执行中断，需核对交付状态后重试', completed_at=? WHERE job_type='business_autopilot' AND status IN ('running','retrying')", (_now(),))
             connection.execute(
                 "UPDATE jobs SET status='queued', progress=0, message='程序重启后等待恢复', started_at=NULL WHERE status IN ('running','retrying')"
             )
@@ -154,12 +160,19 @@ class PersistentJobEngine:
         payload: Mapping[str, Any],
         *,
         max_attempts: int = 2,
+        idempotency_key: str = '',
     ) -> JobRecord:
         if job_type not in self.handlers:
             raise ValueError("后台任务类型尚未注册")
         encoded = json.dumps(dict(payload), ensure_ascii=False, allow_nan=False)
         if len(encoded.encode("utf-8")) > 500_000:
             raise ValueError("后台任务参数过大")
+        if idempotency_key:
+            with self._connect() as connection:
+                row = connection.execute("SELECT * FROM jobs WHERE task_id=? AND job_type=? AND idempotency_key=? AND (status IN ('queued','running','retrying') OR (status='completed' AND (job_type!='business_autopilot' OR json_extract(result_json,'$.delivery_status') IN ('delivered','partial','chart_ready','needs_reconciliation'))) OR (job_type='business_autopilot' AND status='failed' AND message LIKE '执行中断%')) ORDER BY created_at DESC LIMIT 1",
+                    (str(task_id)[:80], job_type, str(idempotency_key)[:128])).fetchone()
+                if row:
+                    return self._record(row)
         active = self.count_active(task_id)
         if active >= 10:
             raise RuntimeError("同一任务已有过多后台作业，请等待完成或取消")
@@ -168,11 +181,22 @@ class PersistentJobEngine:
         job_id = uuid.uuid4().hex[:20]
         created = _now()
         with self._connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            if idempotency_key:
+                row = connection.execute("SELECT * FROM jobs WHERE task_id=? AND job_type=? AND idempotency_key=? AND (status IN ('queued','running','retrying') OR (status='completed' AND (job_type!='business_autopilot' OR json_extract(result_json,'$.delivery_status') IN ('delivered','partial','chart_ready','needs_reconciliation'))) OR (job_type='business_autopilot' AND status='failed' AND message LIKE '执行中断%')) ORDER BY created_at DESC LIMIT 1",
+                    (str(task_id)[:80], job_type, str(idempotency_key)[:128])).fetchone()
+                if row:
+                    return self._record(row)
             connection.execute(
-                "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (job_id, str(task_id)[:80], job_type, "queued", 0, "等待执行", encoded, "{}", "", created, None, None, 0, max(1, min(int(max_attempts), 5)), 0),
+                "INSERT INTO jobs (job_id,task_id,job_type,status,progress,message,payload_json,result_json,error,created_at,started_at,completed_at,attempts,max_attempts,cancel_requested,idempotency_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (job_id, str(task_id)[:80], job_type, "queued", 0, "等待执行", encoded, "{}", "", created, None, None, 0, max(1, min(int(max_attempts), 5)), 0, str(idempotency_key)[:128]),
             )
-        self._queue.put_nowait(job_id)
+        try:
+            self._queue.put_nowait(job_id)
+        except queue.Full:
+            with self._connect() as connection:
+                connection.execute("UPDATE jobs SET status='failed',message='队列已满，未执行',completed_at=? WHERE job_id=? AND status='queued'", (_now(), job_id))
+            raise RuntimeError('后台任务队列已满，任务未执行') from None
         return self.get(job_id)
 
     def count_active(self, task_id: str) -> int:
@@ -217,7 +241,11 @@ class PersistentJobEngine:
                 context.raise_if_cancelled()
                 encoded = json.dumps(dict(result), ensure_ascii=False, allow_nan=False)
                 if len(encoded.encode("utf-8")) > 1_000_000:
-                    result = {"message": "任务完成；详细结果已写入交付文件", "result_truncated": True}
+                    # Preserve the delivery contract and its download even if
+                    # the detailed plan is too large for the job list.
+                    result = {k: result[k] for k in ('mode', 'status', 'delivery_status', 'download_url',
+                        'execution_performed', 'task_acceptance', 'authorization', 'planning_recovery') if k in result}
+                    result.update({"message": "详细结果请查看交付文件；未确认事项仍需核验", "result_truncated": True, 'auto_execute': False})
                     encoded = json.dumps(result, ensure_ascii=False)
                 with self._connect() as connection:
                     connection.execute(

@@ -6,6 +6,7 @@ from excel_data_toolbox.adaptive_report import build_adaptive_analysis_report
 from excel_data_toolbox.analysis_compiler import compile_analysis
 from excel_data_toolbox.business_contracts import (
     metric_contract, evaluate_metric, relationship_graph, candidate_grain,
+    numeric_values,
 )
 
 
@@ -160,3 +161,172 @@ def test_stateful_rows_require_explicit_population_rules():
     contract = metric_contract(0, "orders", frame, "销售额")
     assert contract.status == "unavailable"
     assert "状态" in str(contract.issues)
+
+
+@pytest.mark.parametrize("values, expected", [
+    (["10%", "20%"], [.1, .2]),
+    (["10.0%", "20.5%"], [.1, .205]),
+    ([" 10％ ", "-5%", "200"], [.1, -.05, 200]),
+])
+def test_percentage_notation_is_dtype_independent(values, expected):
+    original = pd.Series(values)
+    assert numeric_values(original).tolist() == pytest.approx(expected)
+    assert original.tolist() == values
+
+
+@pytest.mark.parametrize("value", ["1%2", "10%%", "%10", "10%foo", "￥10%"])
+def test_malformed_percentage_is_not_laundered_into_a_number(value):
+    assert pd.isna(numeric_values(pd.Series([value])).iloc[0])
+
+
+@pytest.mark.parametrize("field", ["销售额", "数量", "满意度评分", "库存余额"])
+@pytest.mark.parametrize("other", ["200", "200.5"])
+def test_percent_in_nonratio_is_blocked_and_preserved_in_report(field, other):
+    frame = sales().rename(columns={"销售额": field})
+    frame[field] = ["10%", other, "300", "400"]
+    original = frame.copy(deep=True)
+    contract = metric_contract(0, "orders", frame, field)
+    assert contract.status == "unavailable"
+    assert "百分号" in str(contract.issues)
+    assert pd.isna(evaluate_metric(frame, contract)[0])
+    result = build_adaptive_analysis_report([frame], source_names=["orders"])
+    row = result.outputs["管理层通用总览"].set_index("指标").loc[f"核心指标：{field}"]
+    assert row["结果"] == "不可计算"
+    assert result.outputs["主数据分析"].iloc[0][field] == "10%"
+    assert result.outputs["时间趋势"].empty
+    pd.testing.assert_frame_equal(original, frame)
+
+
+def test_integer_percentage_ratio_reaches_compiler_and_report():
+    frame = sales().assign(利润=[10, 40, 90, 160], 利润率=["10%", "20%", "30%", "40%"])
+    result = build_adaptive_analysis_report([frame], source_names=["orders"])
+    assert result.outputs["管理层通用总览"].set_index("指标").loc["核心指标：利润率", "结果"] == pytest.approx(.3)
+    assert result.outputs["主数据分析"]["利润率"].tolist() == pytest.approx([.1, .2, .3, .4])
+
+
+def test_percent_unit_in_amount_header_is_not_a_monetary_amount():
+    frame = sales().rename(columns={"销售额": "销售额(%)"})
+    assert metric_contract(0, "orders", frame, "销售额(%)").status == "unavailable"
+
+
+@pytest.mark.parametrize("column,currency,unit", [
+    ("币种", "USD", "USD"), ("currency", "eur", "EUR"),
+    ("币种", "美元", "USD"), ("销售额币种", "HKD", "HKD"),
+    ("币种", "人民币", "元"),
+])
+def test_declared_single_currency_is_preserved_in_all_report_layers(column, currency, unit):
+    frame = sales().assign(**{column: currency})
+    original = frame.copy(deep=True)
+    contract = metric_contract(0, "orders", frame, "销售额")
+    assert contract.status == "inferred" and contract.unit == unit
+    assert evaluate_metric(frame, contract)[0] == 1000
+    plan = compile_analysis([frame], source_names=["orders"])
+    assert next(f for f in plan.fact_metrics if f.field == "销售额").unit == unit
+    result = build_adaptive_analysis_report([frame], source_names=["orders"])
+    assert result.outputs["管理层通用总览"].set_index("指标").loc["核心指标：销售额", "单位"] == unit
+    assert result.outputs["语义契约"].iloc[0]["单位"] == unit
+    assert result.outputs["分类排名"]["单位"].eq(unit).all()
+    assert result.outputs["自适应图表看板"]["排名单位"].eq(unit).all()
+    assert result.outputs["自适应图表看板"]["趋势单位"].eq(unit).all()
+    pd.testing.assert_frame_equal(original, frame)
+
+
+@pytest.mark.parametrize("currencies", [
+    ["USD", "CNY", "USD", "USD"], ["USD", None, "USD", "USD"],
+    ["USD", "", "USD", "USD"], ["UNKNOWN"] * 4,
+])
+def test_mixed_missing_or_unknown_currency_blocks_money(currencies):
+    frame = sales().assign(币种=currencies)
+    assert metric_contract(0, "orders", frame, "销售额").status == "unavailable"
+
+
+def test_currency_aliases_are_not_treated_as_different_currencies():
+    frame = sales().assign(币种=["CNY", "RMB", "人民币", " cny "])
+    contract = metric_contract(0, "orders", frame, "销售额")
+    assert contract.status == "inferred" and contract.unit == "元"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("销售额(元)", 100), ("销售额(万元)", 100), ("销售额", "￥100"), ("销售额", "¥100"),
+])
+def test_currency_conflict_with_header_or_cell_symbol_is_blocked(field, value):
+    frame = sales().rename(columns={"销售额": field})
+    frame[field] = [value, 200, 300, 400]
+    frame["币种"] = "USD"
+    result = build_adaptive_analysis_report([frame], source_names=["orders"])
+    assert result.outputs["管理层通用总览"].set_index("指标").loc[f"核心指标：{field}", "结果"] == "不可计算"
+    assert result.outputs["主数据分析"].iloc[0][field] == value
+
+
+def test_ratio_components_require_compatible_currency_and_nonpercent_amounts():
+    frame = sales().rename(columns={"销售额": "销售额(USD)"})
+    frame["利润(EUR)"] = [10, 20, 30, 40]
+    frame["利润率"] = ["10%"] * 4
+    assert metric_contract(0, "orders", frame, "利润率").status == "unavailable"
+    frame = sales().assign(币种="USD", 利润=[10, 20, 30, 40], 利润率=["10%"] * 4)
+    assert evaluate_metric(frame, metric_contract(0, "orders", frame, "利润率"))[0] == pytest.approx(.1)
+    frame["利润"] = ["10%", "20", "30", "40"]
+    assert metric_contract(0, "orders", frame, "利润率").status == "unavailable"
+
+
+def test_conflicting_currency_declarations_and_irrelevant_currency():
+    frame = sales().assign(币种="USD", currency="EUR")
+    assert metric_contract(0, "orders", frame, "销售额").status == "unavailable"
+    # This is a different metric's currency, not a table-wide declaration.
+    frame = sales().assign(采购币种="USD")
+    assert metric_contract(0, "orders", frame, "销售额").unit != "USD"
+
+
+def test_currency_and_ratio_survive_verified_excel_export(tmp_path):
+    from zipfile import ZipFile
+    import xml.etree.ElementTree as ET
+    from openpyxl import load_workbook
+    from excel_data_toolbox.delivery_qa import export_verified
+    from excel_data_toolbox.core import export_tables
+
+    frame = sales().assign(币种="USD", 利润=[10, 40, 90, 160], 利润率=["10%", "20%", "30%", "40%"])
+    original = frame.copy(deep=True)
+    result = build_adaptive_analysis_report([frame], source_names=["orders"])
+    path = tmp_path / "synthetic_currency_report.xlsx"
+    acceptance = export_verified(result.outputs, path,
+        writer=lambda data, dest: export_tables(data, dest, include_log=False, overwrite=True))
+    assert acceptance.status == "passed"
+    workbook = load_workbook(path, data_only=True)
+    try:
+        rows = list(workbook["管理层通用总览"].values)
+        sales_row = next(row for row in rows if "核心指标：销售额" in row)
+        ratio_row = next(row for row in rows if "核心指标：利润率" in row)
+        assert sales_row[:3] == ("核心指标：销售额", 1000, "USD")
+        assert ratio_row[1] == pytest.approx(.3)
+        assert len(workbook["自适应图表看板"]._charts) == 3
+    finally:
+        workbook.close()
+    with ZipFile(path) as archive:
+        charts = [ET.fromstring(archive.read(name)) for name in archive.namelist()
+                  if name.startswith("xl/charts/chart") and name.endswith(".xml")]
+    namespaces = {"c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+                  "a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    unit_labels = [node.text for chart in charts for node in chart.findall(".//c:catAx/c:title//a:t", namespaces)]
+    unit_labels += [node.text for chart in charts for node in chart.findall(".//c:valAx/c:title//a:t", namespaces)]
+    assert unit_labels.count("指标值（USD）") == 2
+    pd.testing.assert_frame_equal(original, frame)
+
+
+def test_invalid_amount_format_is_preserved_in_verified_excel(tmp_path):
+    from openpyxl import load_workbook
+    from excel_data_toolbox.delivery_qa import export_verified
+    from excel_data_toolbox.core import export_tables
+
+    frame = sales().assign(销售额=["10%", "200.5", "300", "400"])
+    result = build_adaptive_analysis_report([frame], source_names=["orders"])
+    path = tmp_path / "synthetic_invalid_amount.xlsx"
+    assert export_verified(result.outputs, path,
+        writer=lambda data, dest: export_tables(data, dest, include_log=False, overwrite=True)).status == "passed"
+    workbook = load_workbook(path, data_only=True)
+    try:
+        assert any("10%" in row for row in workbook["主数据分析"].values)
+        row = next(row for row in workbook["管理层通用总览"].values if "核心指标：销售额" in row)
+        assert row[1] == "不可计算"
+        assert len(workbook["自适应图表看板"]._charts) == 1  # raw-row counts only, not money
+    finally:
+        workbook.close()

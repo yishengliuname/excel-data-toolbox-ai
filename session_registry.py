@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
 from collections import OrderedDict
 from contextvars import ContextVar
 from typing import Any, Callable
@@ -23,6 +24,7 @@ class SessionRegistry:
         self.sessions[str(initial.task_id)] = initial
         self.default_task_id = str(initial.task_id)
         self._current: ContextVar[str | None] = ContextVar("biaoge_task_session", default=None)
+        self._pins: dict[str, int] = {}
 
     def _touch(self, task_id: str) -> Any:
         session = self.sessions.pop(task_id)
@@ -31,15 +33,33 @@ class SessionRegistry:
 
     def _trim(self) -> None:
         while len(self.sessions) > self.maximum_loaded:
-            task_id, session = next(iter(self.sessions.items()))
-            if task_id == self.default_task_id or task_id == self._current.get():
-                self.sessions.move_to_end(task_id)
-                continue
+            candidate = next(((i, s) for i, s in self.sessions.items()
+                if i != self.default_task_id and i != self._current.get() and not self._pins.get(i)), None)
+            if candidate is None:
+                break  # active jobs remain pinned, never loop or close them
+            task_id, session = candidate
             self.sessions.pop(task_id, None)
             try:
                 session.close()
             except Exception:
                 pass
+
+    @contextmanager
+    def scoped(self, task_id: str):
+        """Background binding does not steal the browser's default task."""
+        with self.lock:
+            if task_id not in self.sessions:
+                self.sessions[task_id] = self.factory(task_id)
+            session = self._touch(task_id)
+            self._pins[task_id] = self._pins.get(task_id, 0) + 1
+            token = self._current.set(task_id)
+        try:
+            yield session
+        finally:
+            with self.lock:
+                self._pins[task_id] -= 1
+                self._current.reset(token)
+                self._trim()
 
     def bind(self, task_id: str | None, *, load: bool = True) -> Any:
         identifier = str(task_id or "").strip()
