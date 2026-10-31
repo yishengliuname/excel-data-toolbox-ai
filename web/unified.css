@@ -25,3 +25,19 @@
 #autonomousPanel progress{width:min(420px,70%);height:12px;accent-color:var(--green);vertical-align:middle}
 #autonomousPanel button{margin-left:14px}#autonomousPanel a{display:inline-block;text-decoration:none}
 @media(max-width:700px){.business-review{padding:14px}.business-profile-tools,.business-confirm-tools{align-items:stretch;flex-direction:column}}
+/* AI API key dialog: each user brings their own DeepSeek key. */
+.ai-key-dialog{position:fixed;inset:0;z-index:120;display:grid;place-items:center;padding:20px;background:rgba(16,32,26,.42)}
+.ai-key-card{width:min(560px,100%);max-height:calc(100vh - 40px);overflow:auto;padding:22px;border-radius:18px;background:#fff;box-shadow:var(--shadow);overflow-wrap:anywhere}
+.ai-key-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+.ai-key-head h3{margin:0;font-size:17px}
+.ai-key-note{margin:10px 0 4px;color:var(--muted);font-size:11px;line-height:1.8}
+.ai-key-note strong{color:var(--danger)}
+.ai-key-label{display:block;margin:12px 0 6px;color:#41514b;font-size:11px;font-weight:750}
+.ai-key-card .input{width:100%}
+.ai-key-check{display:flex;align-items:center;gap:8px;margin-top:10px;color:#5b6a64;font-size:11px}
+.ai-key-check input{accent-color:var(--green)}
+.ai-key-hint{min-height:16px;margin:10px 0 0;color:#6f7d77;font-size:11px;line-height:1.6}
+.ai-key-hint.ok{color:var(--green);font-weight:700}
+.ai-key-hint.bad{color:var(--danger);font-weight:700}
+.ai-key-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:16px}
+@media(max-width:620px){.ai-key-card{padding:16px}.ai-key-actions{display:grid;grid-template-columns:1fr}}

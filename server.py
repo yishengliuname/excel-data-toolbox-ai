@@ -3419,7 +3419,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                         "source": config["source"],
                         "message": "项目级 AI 已配置"
                         if config["configured"]
-                        else "请运行安全配置脚本保存 DeepSeek API Key",
+                        else "请点击右上角「AI 密钥」填写你自己的 DeepSeek API Key",
                         "power_bi": power_bi,
                     }
                 )
@@ -3479,6 +3479,8 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                 "/api/validate": self._validate,
                 "/api/reconcile-advanced": self._reconcile_advanced,
                 "/api/ai-diagnose": self._ai_diagnose,
+                "/api/ai-key-save": self._ai_key_save,
+                "/api/ai-key-clear": self._ai_key_clear,
                 "/api/ai-plan": self._ai_plan,
                 "/api/ai-chart-plan": self._ai_chart_plan,
                 "/api/ai-unified": self._ai_unified,
@@ -3992,6 +3994,64 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             api_key = ""
             raw_key = ""
         return result
+
+    def _ai_key_save(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist the caller's own DeepSeek key into the local DPAPI vault."""
+
+        _validate_payload_keys(payload, {"api_key", "model", "verify"})
+        raw_key = payload.get("api_key")
+        if not isinstance(raw_key, str):
+            raise ApiError("DeepSeek API Key 格式无效")
+        api_key = raw_key.strip()
+        if not api_key:
+            raise ApiError("请填写你自己的 DeepSeek API Key")
+        if len(api_key) > 512 or any(character.isspace() for character in api_key):
+            raise ApiError("DeepSeek API Key 格式无效")
+        requested_model = str(payload.get("model") or "").strip()
+        if requested_model and requested_model not in SUPPORTED_DEEPSEEK_MODELS:
+            raise ApiError("模型不可用；请选择 deepseek-v4-flash 或 deepseek-v4-pro")
+        verified = False
+        try:
+            if payload.get("verify") is True:
+                DeepSeekClient(api_key, model=requested_model or "deepseek-v4-flash", timeout_seconds=20).check_connection()
+                verified = True
+            if not SECRET_STORE.available:
+                raise ApiError("当前系统不支持 Windows DPAPI 安全存储", 501)
+            SECRET_STORE.set("DEEPSEEK_API_KEY", api_key)
+        except SecretStoreError as exc:
+            raise ApiError(str(exc) or "无法写入本机安全密钥库") from None
+        except DeepSeekAPIError as exc:
+            safe_message = str(exc).replace(api_key, "[API Key 已隐藏]")
+            safe_message = AI_SECRET_PATTERN.sub("[API Key 已隐藏]", safe_message)
+            raise ApiError(safe_message or "DeepSeek 连接检测失败", 502) from None
+        finally:
+            api_key = ""
+            raw_key = ""
+        config = _project_ai_config()
+        return {
+            "configured": config["configured"],
+            "source": config["source"],
+            "model": config["model"],
+            "verified": verified,
+            "message": "DeepSeek API Key 已加密保存在本机（Windows DPAPI），不会写入日志、任务或导出文件",
+        }
+
+    def _ai_key_clear(self, payload: dict[str, Any]) -> dict[str, Any]:
+        _validate_payload_keys(payload, set())
+        try:
+            removed = SECRET_STORE.delete("DEEPSEEK_API_KEY")
+        except SecretStoreError as exc:
+            raise ApiError(str(exc) or "无法访问本机安全密钥库") from None
+        config = _project_ai_config()
+        return {
+            "removed": removed,
+            "configured": config["configured"],
+            "source": config["source"],
+            "model": config["model"],
+            "message": "已从本机安全密钥库移除 DeepSeek API Key"
+            if removed
+            else "本机密钥库中没有已保存的 DeepSeek API Key",
+        }
 
     def _ai_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
         _validate_payload_keys(payload, {"prompt", "api_key", "model", "table_ids"})

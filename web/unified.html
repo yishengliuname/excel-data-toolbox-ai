@@ -14,6 +14,7 @@
       <div class="top-status">
         <span id="localStatus" class="status-pill online"><i></i>数据仅在本机执行</span>
         <span id="aiConfigStatus" class="status-pill waiting" role="button" tabindex="0" title="点击测试 DeepSeek 连接"><i></i>正在检查 AI</span>
+        <button id="aiKeyBtn" class="quiet-button" type="button" title="填写你自己的 DeepSeek API Key">AI 密钥</button>
         <button id="resetBtn" class="quiet-button" type="button">新建任务</button>
       </div>
     </header>
@@ -79,6 +80,30 @@
       </div>
     </section>
   </main>
+  <div id="aiKeyDialog" class="ai-key-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="aiKeyTitle">
+    <div class="ai-key-card">
+      <div class="ai-key-head">
+        <h3 id="aiKeyTitle">配置你自己的 DeepSeek API Key</h3>
+        <button id="aiKeyCloseBtn" class="quiet-button" type="button" aria-label="关闭密钥设置">关闭</button>
+      </div>
+      <p class="ai-key-note">本工具<strong>不内置任何 API Key</strong>。密钥由你自行提供，保存后使用 Windows DPAPI 加密，只有当前 Windows 用户能解密；不会写入日志、任务目录或导出文件。</p>
+      <label class="ai-key-label" for="aiKeyInput">DeepSeek API Key</label>
+      <input id="aiKeyInput" class="input" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...（在 platform.deepseek.com 创建）">
+      <div class="ai-key-row">
+        <label class="ai-key-label" for="aiKeyModel">默认模型</label>
+        <select id="aiKeyModel" class="input">
+          <option value="deepseek-v4-flash">deepseek-v4-flash（更快、更省）</option>
+          <option value="deepseek-v4-pro">deepseek-v4-pro（推理更强）</option>
+        </select>
+      </div>
+      <label class="ai-key-check"><input id="aiKeyVerify" type="checkbox" checked> 保存前先验证一次连接</label>
+      <p id="aiKeyHint" class="ai-key-hint"></p>
+      <div class="ai-key-actions">
+        <button id="aiKeySaveBtn" class="run-button" type="button">保存到本机</button>
+        <button id="aiKeyClearBtn" class="danger-button" type="button">删除已保存的密钥</button>
+      </div>
+    </div>
+  </div>
   <div id="toast" class="toast" role="status"></div>
   <script src="/static/app.js?v=9.1.0"></script>
 </body>

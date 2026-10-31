@@ -20,7 +20,7 @@ const endpoints = {
   businessReview: "/api/business-review", businessConfirm: "/api/business-confirm", businessProfiles: "/api/business-profiles",
   businessRevoke: "/api/business-profile-revoke",
   aiRun: "/api/ai-run", jobs: "/api/jobs", jobCancel: "/api/job-cancel",
-  aiCapabilities: "/api/ai-capabilities", aiDiagnose: "/api/ai-diagnose", aiPlan: "/api/ai-plan", aiChartPlan: "/api/ai-chart-plan", aiUnified: "/api/ai-unified", configStatus: "/api/config-status", aiExecute: "/api/ai-execute", aiEngineering: "/api/ai-engineering"
+  aiCapabilities: "/api/ai-capabilities", aiDiagnose: "/api/ai-diagnose", aiPlan: "/api/ai-plan", aiChartPlan: "/api/ai-chart-plan", aiUnified: "/api/ai-unified", configStatus: "/api/config-status", aiKeySave: "/api/ai-key-save", aiKeyClear: "/api/ai-key-clear", aiExecute: "/api/ai-execute", aiEngineering: "/api/ai-engineering"
 };
 
 const recipePresets = {
@@ -2292,6 +2292,76 @@ async function unifiedDiagnoseConnection(){
   catch(error){status.className="status-pill error";status.innerHTML="<i></i>AI 连接失败";toast(redactAiSecrets(error.message),"error");}
 }
 
+async function unifiedRefreshAiConfig(){
+  try{
+    const config=await api(endpoints.configStatus);
+    const pill=$("aiConfigStatus");
+    pill.className=`status-pill ${config.configured?"ready":"error"}`;
+    pill.innerHTML=`<i></i>${escapeHtml(config.configured?`AI 已配置 · ${config.model}`:"AI 待配置 · 请填写密钥")}`;
+    $("modelLabel").textContent=config.configured?`${config.model} 自动判断工具与步骤`:"请点击右上角「AI 密钥」填写你自己的 DeepSeek API Key";
+    if($("aiKeyBtn"))$("aiKeyBtn").textContent=config.configured?"AI 密钥 ✓":"AI 密钥";
+    return config;
+  }catch(error){
+    $("aiConfigStatus").className="status-pill error";
+    $("aiConfigStatus").innerHTML="<i></i>AI 配置读取失败";
+    return null;
+  }
+}
+
+function unifiedAiKeyHint(message,kind=""){
+  const hint=$("aiKeyHint");
+  if(!hint)return;
+  hint.textContent=message||"";
+  hint.className=`ai-key-hint${kind?` ${kind}`:""}`;
+}
+
+function unifiedToggleAiKeyDialog(open){
+  const dialog=$("aiKeyDialog");
+  if(!dialog)return;
+  const show=open===undefined?dialog.classList.contains("hidden"):Boolean(open);
+  dialog.classList.toggle("hidden",!show);
+  if(show){
+    unifiedAiKeyHint("");
+    $("aiKeyInput").value="";
+    $("aiKeyInput").focus();
+  }
+}
+
+async function unifiedSaveAiKey(){
+  const key=$("aiKeyInput").value.trim();
+  if(!key)return unifiedAiKeyHint("请先粘贴你自己的 DeepSeek API Key","bad");
+  const verify=Boolean($("aiKeyVerify")&&$("aiKeyVerify").checked);
+  const button=$("aiKeySaveBtn");
+  button.disabled=true;button.textContent=verify?"正在验证并保存…":"正在保存…";
+  unifiedAiKeyHint(verify?"正在连接 DeepSeek 校验密钥，请稍候…":"正在写入本机加密密钥库…");
+  try{
+    const result=await post(endpoints.aiKeySave,{api_key:key,model:$("aiKeyModel").value,verify});
+    $("aiKeyInput").value="";
+    unifiedAiKeyHint(result.message||"已保存到你本机的加密密钥库","ok");
+    toast(verify&&result.verified?"密钥已验证并加密保存到本机":"密钥已加密保存到本机","success");
+    await unifiedRefreshAiConfig();
+  }catch(error){
+    const safe=redactAiSecrets(String(error.message||"保存失败").split(key).join("[API Key 已隐藏]"));
+    unifiedAiKeyHint(safe,"bad");
+  }finally{
+    button.disabled=false;button.textContent="保存到本机";
+  }
+}
+
+async function unifiedClearAiKey(){
+  if(!window.confirm("确定从本机密钥库删除已保存的 DeepSeek API Key 吗？"))return;
+  const button=$("aiKeyClearBtn");
+  button.disabled=true;
+  try{
+    const result=await post(endpoints.aiKeyClear,{});
+    unifiedAiKeyHint(result.message||"已删除","ok");
+    toast(result.removed?"已删除本机保存的密钥":"本机没有已保存的密钥");
+    await unifiedRefreshAiConfig();
+  }catch(error){
+    unifiedAiKeyHint(String(error.message||"删除失败"),"bad");
+  }finally{button.disabled=false;}
+}
+
 async function setupUnifiedUi(){
   $("chooseFileBtn").addEventListener("click",()=>$("fileInput").click());$("dropZone").addEventListener("click",event=>{if(event.target.closest("button"))return;$("fileInput").click();});$("fileInput").addEventListener("change",event=>{unifiedUpload(event.target.files);event.target.value="";});
   ["dragenter","dragover"].forEach(name=>$("dropZone").addEventListener(name,event=>{event.preventDefault();$("dropZone").classList.add("dragging");}));["dragleave","drop"].forEach(name=>$("dropZone").addEventListener(name,event=>{event.preventDefault();$("dropZone").classList.remove("dragging");}));$("dropZone").addEventListener("drop",event=>unifiedUpload(event.dataTransfer.files));
@@ -2303,7 +2373,14 @@ async function setupUnifiedUi(){
   $("clearTaskBtn").addEventListener("click",async()=>{if(!(state.data?.tables||[]).length)return toast("当前已经是空任务","success");if(!window.confirm("确定清空当前任务的全部表格、处理结果和临时文件吗？此操作无法恢复。"))return;unifiedSetBusy(true,"正在清空当前任务…");try{await unifiedClearTask();}catch(error){toast(error.message,"error");}finally{unifiedSetBusy(false);}});
   $("resetBtn").addEventListener("click",async()=>{if((state.data?.tables||[]).length&&!window.confirm("确定结束当前任务并新建空白任务吗？"))return;await unifiedClearTask("已新建空白任务");});
   $("aiConfigStatus").addEventListener("click",unifiedDiagnoseConnection);$("aiConfigStatus").addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();unifiedDiagnoseConnection();}});
-  try{const config=await api(endpoints.configStatus);$("aiConfigStatus").className=`status-pill ${config.configured?"ready":"error"}`;$("aiConfigStatus").innerHTML=`<i></i>${escapeHtml(config.configured?`AI 已配置 · ${config.model}`:"AI 待配置 · 安全密钥")}`;$("modelLabel").textContent=config.configured?`${config.model} 自动判断工具与步骤`:"请运行安全配置脚本保存 DeepSeek API Key";}catch(error){$("aiConfigStatus").className="status-pill error";$("aiConfigStatus").innerHTML="<i></i>AI 配置读取失败";}
+  $("aiKeyBtn")?.addEventListener("click",()=>unifiedToggleAiKeyDialog(true));
+  $("aiKeyCloseBtn")?.addEventListener("click",()=>unifiedToggleAiKeyDialog(false));
+  $("aiKeySaveBtn")?.addEventListener("click",unifiedSaveAiKey);
+  $("aiKeyClearBtn")?.addEventListener("click",unifiedClearAiKey);
+  $("aiKeyInput")?.addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();unifiedSaveAiKey();}});
+  $("aiKeyDialog")?.addEventListener("click",event=>{if(event.target===$("aiKeyDialog"))unifiedToggleAiKeyDialog(false);});
+  document.addEventListener("keydown",event=>{const dialog=$("aiKeyDialog");if(event.key==="Escape"&&dialog&&!dialog.classList.contains("hidden"))unifiedToggleAiKeyDialog(false);});
+  await unifiedRefreshAiConfig();
   await unifiedRefresh();
   await unifiedRestoreDelivery();
 }
