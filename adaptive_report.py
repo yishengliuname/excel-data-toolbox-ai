@@ -17,6 +17,8 @@ from typing import Any
 
 import pandas as pd
 
+from .task_contract import compile_scope, apply_scope
+
 try:
     from .analysis_compiler import compile_analysis
     from .metric_semantics import classify_metric, classify_sheet_role
@@ -202,8 +204,8 @@ def validate_adaptive_report_params(params: Mapping[str, Any]) -> None:
     if not isinstance(request, str) or len(request) > 8_000:
         raise TypeError("user_request 必须是不超过8000字符的文本")
     top_n = params.get("top_n", 10)
-    if isinstance(top_n, bool) or not isinstance(top_n, int) or not 3 <= top_n <= 30:
-        raise ValueError("top_n 必须是3到30之间的整数")
+    if isinstance(top_n, bool) or not isinstance(top_n, int) or not 1 <= top_n <= 30:
+        raise ValueError("top_n 必须是1到30之间的整数")
     multiplier = params.get("outlier_multiplier", 1.5)
     if isinstance(multiplier, bool) or not isinstance(multiplier, (int, float)) or not 1 <= float(multiplier) <= 10:
         raise ValueError("outlier_multiplier 必须是1到10之间的数字")
@@ -253,6 +255,10 @@ def build_adaptive_analysis_report(
     prepared = prepare_business_data(frames, source_names, business_rules) if business_rules is not None else None
     if prepared is not None:
         frames = prepared.frames
+    scope = compile_scope(user_request, frames, source_names, prepared.contexts if prepared else None)
+    frames, scope_excluded, scope_checks = apply_scope(scope, frames, source_names, prepared.contexts if prepared else None)
+    if scope.top_n is not None:
+        top_n = scope.top_n
     valid = [(index, frame) for index, frame in enumerate(frames) if isinstance(frame, pd.DataFrame) and not frame.empty]
     if not valid:
         raise ValueError("没有可分析的非空数据表")
@@ -564,6 +570,9 @@ def build_adaptive_analysis_report(
     if prepared is not None:
         outputs.update({"规则处理审计": prepared.audit, "规则排除明细": prepared.excluded,
                         "原始记录留档": prepared.originals})
+    if scope_checks:
+        outputs['任务范围与验收'] = pd.DataFrame(scope_checks).drop(columns=['scope'])
+        outputs['范围排除明细'] = pd.concat(scope_excluded, ignore_index=True, sort=False) if scope_excluded else pd.DataFrame(columns=['范围来源表', '范围排除原因'])
     for output in outputs.values():
         output.attrs["toolbox_report_kind"] = "adaptive_analysis_report"
     report = {
@@ -578,6 +587,7 @@ def build_adaptive_analysis_report(
         "relation_count": len(relation_frame), "anomaly_count": len(anomalies),
         "sheet_count": len(outputs),
         "business_rules_applied": prepared is not None,
+        "task_scope": scope.to_dict(), "constraint_checks": scope_checks,
         "request_coverage": [dict(topic=q.topic, status=q.status, missing=list(q.missing),
                                   boundary=q.conclusion_boundary) for q in compiled.question_evidence],
         "chart_count": int(dashboard["排名分类"].notna().any()) + int("月份" in dashboard and bool(trend_metrics)) + int("结构分类" in dashboard),

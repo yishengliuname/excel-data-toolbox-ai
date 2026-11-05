@@ -274,15 +274,8 @@ def allocate_amount(amount: Decimal, rows: list[dict], weight: str) -> list[Deci
     total = strict_sum(r.get(weight) for r in rows)
     if total is None or total <= 0 or amount < 0 or amount != money(amount) or any(r[weight] < 0 for r in rows):
         return None
-    allocations, remaining = [], amount
-    for row in rows[:-1]:
-        # Independent half-up rounding can over-allocate very small refunds.
-        # Bound each allocation to remaining cash so the last row never gets
-        # a negative refund. Stable row order supplies deterministic tails.
-        value = min(money(amount * row[weight] / total), remaining)
-        allocations.append(value)
-        remaining -= value
-    return [*allocations, amount - sum(allocations, ZERO)]
+    from .business_kernel import allocate_money
+    return allocate_money(amount, [r[weight] for r in rows], method='last_residual')
 
 
 def effective_value(rows: list[dict], sku: str, when: datetime) -> Decimal | None:

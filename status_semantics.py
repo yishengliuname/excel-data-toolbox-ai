@@ -20,6 +20,7 @@ REFUND_CONFIRMED = "REFUND_CONFIRMED"
 REFUND_PENDING = "REFUND_PENDING"
 RECEIPT_CONFIRMED = "RECEIPT_CONFIRMED"
 RECEIPT_PENDING = "RECEIPT_PENDING"
+ADJUSTMENT_CONFIRMED = "ADJUSTMENT_CONFIRMED"
 UNKNOWN = "UNKNOWN"
 
 _SEPARATORS = re.compile(r"[\s_\-—/|,，。；;：:（）()【】\[\]]+")
@@ -56,6 +57,7 @@ def classify_order_status(value: object) -> str:
             "已关闭",
             "关闭",
             "作废",
+            "撤销",
         ),
     ):
         return ORDER_INVALID
@@ -104,11 +106,18 @@ def classify_receipt_status(value: object) -> str:
     text = _normalise(value)
     if not text:
         return UNKNOWN
-    if _has(text, ("未入库", "待入库", "待验收", "入库失败", "取消", "关闭", "作废")):
+    if _has(text, ("未入库", "待入库", "待验收", "入库失败", "取消", "关闭", "作废", "撤销")):
         return RECEIPT_PENDING
     if _has(text, ("已入库", "入库完成", "验收完成", "已验收")):
         return RECEIPT_CONFIRMED
     return UNKNOWN
+
+
+def classify_adjustment_status(value: object) -> str:
+    text = _normalise(value)
+    if not text or _has(text, ('未确认', '待确认', '待审核', '取消', '撤销', '驳回', '作废')):
+        return UNKNOWN
+    return ADJUSTMENT_CONFIRMED if text in {'已确认', '已审批', '审批通过', '已生效'} else UNKNOWN
 
 
 def classify_status_series(series: pd.Series, classifier: Callable[[object], str]) -> pd.Series:
@@ -122,11 +131,13 @@ __all__ = [
     "ORDER_SUCCESS",
     "RECEIPT_CONFIRMED",
     "RECEIPT_PENDING",
+    "ADJUSTMENT_CONFIRMED",
     "REFUND_CONFIRMED",
     "REFUND_PENDING",
     "UNKNOWN",
     "classify_order_status",
     "classify_receipt_status",
+    "classify_adjustment_status",
     "classify_refund_status",
     "classify_status_series",
 ]

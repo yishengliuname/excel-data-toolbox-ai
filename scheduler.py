@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 import json
@@ -72,10 +73,15 @@ class LocalScheduler:
         self._thread: threading.Thread | None = None
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.database, timeout=10)
-        connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _init_db(self) -> None:
         with self._connect() as connection:

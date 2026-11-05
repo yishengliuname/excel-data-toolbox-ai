@@ -290,6 +290,8 @@ PARAM_KEYS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = MappingProxyTy
 
 ALLOWED_OPERATIONS = frozenset(INPUT_COUNTS)
 REPORT_OPERATIONS = frozenset(name for name in ALLOWED_OPERATIONS if name.endswith("_report")) | {"customer_order_analysis"}
+PARAM_KEYS = MappingProxyType({name: (required, allowed | {'request_scope'} if name in REPORT_OPERATIONS else allowed)
+                              for name, (required, allowed) in PARAM_KEYS.items()})
 
 if ALLOWED_OPERATIONS != frozenset(PARAM_KEYS):
     raise RuntimeError("Operation contracts are incomplete")

@@ -19,6 +19,8 @@ from typing import Mapping
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import range_boundaries, get_column_letter
+from openpyxl.worksheet.table import TableColumn
 
 
 INVALID_SHEET_CHARS = re.compile(r"[\\/*?:\[\]]")
@@ -37,6 +39,19 @@ def _safe_sheet_name(value: str, used: set[str]) -> str:
 
 
 def _write_frame(worksheet, frame: pd.DataFrame, *, replace_existing: bool) -> None:
+    affected_tables = []
+    if replace_existing:
+        if any(cell.data_type == 'f' for row in worksheet for cell in row):
+            raise ValueError('保真替换区域含原生公式；请追加结果表，不能丢弃公式逻辑')
+        if worksheet.merged_cells.ranges:
+            raise ValueError('保真替换包含合并单元格；请追加结果表，不能破坏原布局')
+        for table in worksheet.tables.values():
+            left, top, right, bottom = range_boundaries(table.ref)
+            if (left, top) != (1, 1):
+                raise ValueError('保真替换存在多个或非A1起始Table，须确认替换区域')
+            if table.totalsRowCount:
+                raise ValueError('含原生汇总行的Table不能按普通矩形覆盖，请追加结果')
+            affected_tables.append(table)
     old_rows = worksheet.max_row
     old_columns = worksheet.max_column
     if replace_existing:
@@ -63,6 +78,7 @@ def _write_frame(worksheet, frame: pd.DataFrame, *, replace_existing: bool) -> N
 
     for column_index, column in enumerate(frame.columns, start=1):
         cell = worksheet.cell(1, column_index, str(column))
+        cell.data_type = 's'
         if header_style:
             for attribute, value in header_style.items():
                 setattr(cell, attribute, value)
@@ -77,7 +93,9 @@ def _write_frame(worksheet, frame: pd.DataFrame, *, replace_existing: bool) -> N
                 value = None
             elif isinstance(value, pd.Timestamp):
                 value = value.to_pydatetime()
-            worksheet.cell(row_index, column_index, value)
+            cell = worksheet.cell(row_index, column_index, value)
+            if isinstance(value, str):
+                cell.data_type = 's'
 
     if worksheet.max_row > len(frame) + 1:
         for row in worksheet.iter_rows(
@@ -90,6 +108,11 @@ def _write_frame(worksheet, frame: pd.DataFrame, *, replace_existing: bool) -> N
                 cell.value = None
     worksheet.freeze_panes = worksheet.freeze_panes or "A2"
     worksheet.auto_filter.ref = f"A1:{worksheet.cell(max(1, len(frame) + 1), max(1, len(frame.columns))).coordinate}"
+    for table in affected_tables:
+        table.ref = f'A1:{get_column_letter(len(frame.columns))}{max(2, len(frame) + 1)}'
+        if table.autoFilter is not None:
+            table.autoFilter.ref = table.ref
+        table.tableColumns = [TableColumn(id=i, name=str(name)) for i, name in enumerate(frame.columns, 1)]
 
 
 def preserve_workbook_export(
@@ -108,6 +131,8 @@ def preserve_workbook_export(
 
     source = Path(source_workbook).resolve()
     target = Path(destination).resolve()
+    if source == target:
+        raise ValueError('输出路径不能覆盖原始工作簿')
     if source.suffix.lower() not in {".xlsx", ".xlsm"}:
         raise ValueError("保真模式只支持 .xlsx 或 .xlsm 源文件")
     if not source.is_file():

@@ -12,6 +12,8 @@ from typing import Any, Mapping, Sequence
 import math
 import pandas as pd
 
+from .business_kernel import complete_sum, unique_master, numbers, deduplicate_events, allocate_money
+
 try:
     from .metric_semantics import classify_sheet_role
     from .status_semantics import (
@@ -536,8 +538,8 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
     dish = r["dishes"]
     dish_id = _text(_col(dish, "菜品编码", "商品编码", "SKU", required=True))
     dish_name = _text(_col(dish, "菜品名称", "商品名称", "名称"))
-    dish_cost = _num(_col(dish, "标准食材成本", "标准成本", "食材成本"))
-    dish_map = pd.DataFrame({"菜品编码": dish_id, "菜品名称": dish_name, "标准食材成本": dish_cost}).drop_duplicates("菜品编码")
+    dish_cost = numbers(_col(dish, "标准食材成本", "标准成本", "食材成本"))
+    dish_map = unique_master(pd.DataFrame({"菜品编码": dish_id, "菜品名称": dish_name, "标准食材成本": dish_cost}), ['菜品编码'], label='菜品主数据')
 
     pos_raw = r["pos"]
     pos = pd.DataFrame({
@@ -559,31 +561,37 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
     raw_duplicate_count = int(pos["精确重复"].sum())
     pos = pos.loc[~pos["精确重复"]].copy()
     pos = pos.merge(dish_map, on="菜品编码", how="left", validate="many_to_one")
-    pos["标准食材成本金额"] = pos["数量"].fillna(0) * pos["标准食材成本"].fillna(0)
+    pos["标准食材成本金额"] = pos["数量"] * pos["标准食材成本"]
     pos["月份"] = pos["营业日期"].dt.to_period("M").astype("string")
 
     refund_raw = r["refunds"]
     refunds = pd.DataFrame({"退款日期": _date(_col(refund_raw, "退款日期", "申请日期", "日期")), "退款单号": _text(_col(refund_raw, "退款单号", "售后单号")), "原订单号": _text(_col(refund_raw, "原订单号", "订单号", required=True)), "退款类型": _text(_col(refund_raw, "退款类型", "售后类型")), "退款金额": _num(_col(refund_raw, "退款金额", "金额", required=True)), "状态": _text(_col(refund_raw, "状态", "售后状态")), "原因": _text(_col(refund_raw, "原因", "退款原因")), "责任归属": _text(_col(refund_raw, "责任归属", "归属"))})
     refunds["状态语义"] = classify_status_series(refunds["状态"], classify_refund_status)
+    refunds, refund_duplicates = deduplicate_events(refunds, ['退款单号'], label='餐饮退款流水')
     refunds["已发生退款"] = refunds["状态语义"].eq(REFUND_CONFIRMED)
     refunds["处理中"] = refunds["状态语义"].eq(REFUND_PENDING)
-    order_month = pos[["订单号", "月份"]].drop_duplicates("订单号").rename(columns={"月份": "订单归属月份"})
+    order_month = unique_master(pos[['订单号', '门店编码', '月份']], ['订单号'], label='POS订单归属').drop(columns=['门店编码']).rename(columns={"月份": "订单归属月份"})
     refunds = refunds.merge(order_month, left_on="原订单号", right_on="订单号", how="left", validate="many_to_one")
     refunds = refunds.drop(columns=["订单号"], errors="ignore")
     refunds["退款发生月份"] = _month(refunds["退款日期"])
-    refund_by_order = refunds.loc[refunds["已发生退款"]].groupby("原订单号", as_index=False)["退款金额"].sum().rename(columns={"退款金额": "已退款金额"})
+    confirmed = refunds.loc[refunds['已发生退款']]
+    if confirmed['退款金额'].isna().any() or confirmed['退款金额'].lt(0).any():
+        raise ValueError('已确认退款金额缺失、无效或为负数，不能按零汇总')
+    refund_by_order = confirmed.groupby("原订单号", as_index=False)["退款金额"].sum().rename(columns={"退款金额": "已退款金额"})
     pos = pos.merge(refund_by_order, left_on="订单号", right_on="原订单号", how="left").drop(columns=["原订单号"], errors="ignore")
     pos["已退款金额"] = pos["已退款金额"].fillna(0)
     pos["订单实付合计"] = pos.groupby("订单号", dropna=False)["实付分摊"].transform("sum")
-    pos["退款分摊"] = pos["已退款金额"].mul(pos["实付分摊"]).div(
-        pos["订单实付合计"].where(pos["订单实付合计"].gt(0))
-    )
+    pos['退款分摊'] = 0.0
+    for _, group in pos.groupby('订单号', sort=False):
+        amount = group['已退款金额'].iloc[0]
+        if amount:
+            pos.loc[group.index, '退款分摊'] = [float(x) for x in allocate_money(amount, group['实付分摊'])]
     pos["退款分摊状态"] = "无退款"
     pos.loc[pos["已退款金额"].gt(0) & pos["订单实付合计"].gt(0), "退款分摊状态"] = "按订单行实付比例分摊"
     pos.loc[pos["已退款金额"].gt(0) & ~pos["订单实付合计"].gt(0), "退款分摊状态"] = "人工核验：订单实付合计无效"
     total_sales = float(pos.loc[pos["有效订单"], "实付分摊"].sum())
     total_refund = float(refunds.loc[refunds["已发生退款"], "退款金额"].sum())
-    standard_food = float(pos.loc[pos["有效订单"], "标准食材成本金额"].sum())
+    standard_food = complete_sum(pos.loc[pos["有效订单"], "标准食材成本金额"])
 
     settlement = r["settlements"]
     settlement_out = pd.DataFrame({"结算月份": _text(_col(settlement, "结算月份", "月份", required=True)), "门店编码": _text(_col(settlement, "门店编码", "门店")), "平台": _text(_col(settlement, "平台", "渠道")), "结算基数": _num(_col(settlement, "订单结算基数", "结算基数", "订单金额")), "平台佣金": _num(_col(settlement, "平台佣金", "佣金")), "配送服务费": _num(_col(settlement, "配送服务费", "配送费")), "活动补贴承担": _num(_col(settlement, "活动补贴承担", "平台活动承担", "活动补贴成本", "活动补贴扣减", "活动扣减")), "退款冲减": _num(_col(settlement, "退款冲减")), "实际到账": _num(_col(settlement, "实际到账", "到账金额", "实收"))})
@@ -630,6 +638,8 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
     for col in ("已退款金额", "实际到账", "平台成本", "人工成本", "固定费用", "加班工时", "实际工时"):
         if col not in store: store[col] = 0.0
         store[col] = store[col].fillna(0)
+    unknown_cost = pos.loc[pos['有效订单'] & pos['标准食材成本金额'].isna()]
+    store.loc[store['门店编码'].isin(unknown_cost['门店编码']), '标准食材成本'] = float('nan')
     store["可比经营贡献"] = store["营业实付"] - store["已退款金额"] - store["标准食材成本"] - store["平台成本"]
     store["情景结果"] = store["可比经营贡献"] - store["人工成本"] - store["固定费用"]
     store["加班率"] = store["加班工时"].div(store["实际工时"].where(store["实际工时"].ne(0)))
@@ -638,9 +648,10 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
 
     dish_out = valid.groupby(["菜品编码", "菜品名称"], dropna=False, as_index=False).agg(销量=("数量", "sum"), 营业实付=("实付分摊", "sum"), 已退款金额=("退款分摊", "sum"), 标准食材成本金额=("标准食材成本金额", "sum"))
     dish_out["退款后实付"] = dish_out["营业实付"] - dish_out["已退款金额"]
+    dish_out.loc[dish_out['菜品编码'].isin(unknown_cost['菜品编码']), '标准食材成本金额'] = float('nan')
     dish_out["退款后贡献"] = dish_out["退款后实付"] - dish_out["标准食材成本金额"]
     dish_out["贡献率"] = dish_out["退款后贡献"].div(dish_out["退款后实付"].where(dish_out["退款后实付"].ne(0)))
-    dish_out["管理提示"] = dish_out.apply(lambda x: "高销量低贡献，检查定价/折扣/BOM" if x["贡献率"] < low_margin_threshold else "正常" if pd.notna(x["贡献率"]) else "标准成本缺失，人工核验", axis=1)
+    dish_out["管理提示"] = dish_out.apply(lambda x: '标准成本缺失，人工核验' if pd.isna(x['贡献率']) else '高销量低贡献，检查定价/折扣/BOM' if x['贡献率'] < low_margin_threshold else '正常', axis=1)
 
     month_sales = valid.groupby("月份", as_index=False).agg(营业实付=("实付分摊", "sum"), 标准食材成本=("标准食材成本金额", "sum"))
     confirmed_refunds = refunds.loc[refunds["已发生退款"]].copy()
@@ -651,6 +662,7 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
     monthly_occurrence = month_sales.merge(month_ref, on="月份", how="outer").merge(month_platform, on="月份", how="outer").merge(month_labor, on="月份", how="outer").merge(month_fixed, on="月份", how="outer")
     occurrence_amounts = ["营业实付", "已退款金额", "标准食材成本", "平台成本", "人工成本", "加班工时", "固定费用"]
     monthly_occurrence[occurrence_amounts] = monthly_occurrence[occurrence_amounts].fillna(0)
+    monthly_occurrence.loc[monthly_occurrence['月份'].isin(unknown_cost['月份']), '标准食材成本'] = float('nan')
     monthly_occurrence["可比经营贡献"] = monthly_occurrence["营业实付"] - monthly_occurrence["已退款金额"] - monthly_occurrence["标准食材成本"] - monthly_occurrence["平台成本"]
     monthly_occurrence["情景经营结果"] = monthly_occurrence["可比经营贡献"] - monthly_occurrence["人工成本"] - monthly_occurrence["固定费用"]
     monthly_occurrence["时间口径"] = "发生月视角"
@@ -659,6 +671,7 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
     attributed_refunds = confirmed_refunds.dropna(subset=["订单归属月份"]).groupby("订单归属月份", as_index=False)["退款金额"].sum().rename(columns={"订单归属月份": "月份", "退款金额": "已退款金额"})
     monthly_attributed = month_sales.merge(attributed_refunds, on="月份", how="outer")
     monthly_attributed[["营业实付", "已退款金额", "标准食材成本"]] = monthly_attributed[["营业实付", "已退款金额", "标准食材成本"]].fillna(0)
+    monthly_attributed.loc[monthly_attributed['月份'].isin(unknown_cost['月份']), '标准食材成本'] = float('nan')
     monthly_attributed["平台成本"] = math.nan
     monthly_attributed["人工成本"] = math.nan
     monthly_attributed["加班工时"] = math.nan
@@ -845,6 +858,10 @@ def build_restaurant_diagnosis_report(frames: Sequence[pd.DataFrame], *, source_
     report = {"schema_version": 1, "status": "ready", "summary": "已按餐饮多事实域重建门店、渠道、菜品、原料、人工、评价和退款分析；经营结果受数据期间/单位一致性约束。", "message": "已识别为餐饮门店经营诊断，输出跨表可追溯经营报告。", "warnings": ["标准食材成本是管理口径，不替代财务结转；情景结果若尺度不匹配仅供人工核验。", "外卖结算实际到账与POS销售分开披露，不能重复相加。"], "facts": summary.to_dict("records"), "risks": risk_df.to_dict("records"), "sources": sources_df.to_dict("records"), "report_kind": "restaurant_diagnosis_report"}
     for frame in outputs.values():
         frame.attrs["toolbox_report_kind"] = "restaurant_diagnosis_report"
+    report['constraint_checks'] = [{'item': '有效销售标准成本覆盖', 'status': 'passed' if unknown_cost.empty else 'needs_review'}]
+    report['open_definition_count'] = len(unknown_cost)
+    if not unknown_cost.empty:
+        report['warnings'].append('部分有效菜品标准成本缺失，相关完整成本与贡献不可计算；未按零填补')
     return RestaurantDiagnosisResult(outputs=outputs, report=report)
 
 

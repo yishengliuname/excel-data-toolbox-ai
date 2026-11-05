@@ -31,10 +31,29 @@ def _digest(value):
 
 def engine_revision():
     from pathlib import Path
+    import importlib.util
+    import marshal
     root = Path(__file__).parent
-    return _digest({name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in (
+    def module_digest(name):
+        path = root / name
+        if path.is_file():
+            payload = path.read_bytes()
+        else:
+            # Frozen distributions may bundle bytecode instead of .py files.
+            spec = importlib.util.find_spec(f'{__package__}.{path.stem}')
+            code = spec.loader.get_code(spec.name) if spec and hasattr(spec.loader, 'get_code') else None
+            if code is None:
+                raise BusinessRuleError(f'无法验证运行内核版本：{name}')
+            payload = marshal.dumps(code)
+        return hashlib.sha256(payload).hexdigest()
+    return _digest({name: module_digest(name) for name in (
         'business_rules.py', 'business_contracts.py', 'metric_semantics.py',
-        'analysis_compiler.py', 'adaptive_report.py', 'trusted_automation.py')})
+        'analysis_compiler.py', 'adaptive_report.py', 'trusted_automation.py',
+        'business_kernel.py', 'task_contract.py', 'status_semantics.py',
+        'customer_order_analysis.py', 'inventory_report.py', 'ecommerce_report.py',
+        'restaurant_report.py', 'hr_report.py', 'task_acceptance.py',
+        'nl_agent.py', 'operation_contracts.py', 'workbook_fidelity.py',
+        'io_utils.py', 'server.py', 'autopilot.py', 'task_store.py', 'task_engine.py', 'scheduler.py')})
 
 
 def validate_limits(raw):

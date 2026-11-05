@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 import gzip
 import json
@@ -37,11 +38,16 @@ class TaskRepository:
         self.db_path = self.root / "tasks.sqlite3"
         self._initialise()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.db_path, timeout=10)
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA foreign_keys=ON")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _initialise(self) -> None:
         with self._connect() as connection:
@@ -226,12 +232,15 @@ class TaskRepository:
         with self._connect() as connection:
             connection.execute("DELETE FROM tasks WHERE task_id=?", (_safe_task_id(task_id),))
 
-    def purge_expired(self, *, now: datetime | None = None) -> list[str]:
+    def purge_expired(self, *, now: datetime | None = None, exclude=(), is_active=None) -> list[str]:
         current = (now or datetime.now()).isoformat()
+        protected = {_safe_task_id(task_id) for task_id in exclude}
         with self._connect() as connection:
             rows = connection.execute("SELECT task_id FROM tasks WHERE expires_at < ?", (current,)).fetchall()
         removed: list[str] = []
         for (task_id,) in rows:
+            if task_id in protected or (is_active is not None and is_active(task_id)):
+                continue
             self.delete(task_id)
             removed.append(task_id)
         return removed

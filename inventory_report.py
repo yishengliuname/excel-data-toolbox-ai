@@ -16,6 +16,10 @@ from typing import Any
 
 import pandas as pd
 
+from .business_kernel import number, complete_sum, unique_master, deduplicate_events, through_cutoff, public_evidence
+from .status_semantics import (classify_order_status, classify_receipt_status, classify_adjustment_status,
+                              ORDER_SUCCESS, RECEIPT_CONFIRMED, ADJUSTMENT_CONFIRMED)
+
 
 _NON_WORD = re.compile(r"[\s_\-（）()【】\[\]：:]+")
 
@@ -115,20 +119,7 @@ def _source_label(value: str) -> str:
 
 
 def _parse_number(value: Any) -> float:
-    if value is None or (not isinstance(value, str) and pd.isna(value)):
-        return float("nan")
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
-    text = _clean_text(value)
-    if not text:
-        return float("nan")
-    negative = text.startswith("(") and text.endswith(")")
-    cleaned = re.sub(r"[¥￥元件个台套箱分,%，,\s()]", "", text)
-    try:
-        number = float(cleaned)
-    except ValueError:
-        return float("nan")
-    return -number if negative else number
+    return number(value)
 
 
 def _parse_date(value: Any) -> pd.Timestamp | pd.NaT:
@@ -160,8 +151,8 @@ def _frame_columns(frame: pd.DataFrame, mapping: Mapping[str, Sequence[str]]) ->
 def _deduplicate_documents(frame: pd.DataFrame, key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     work = frame.copy(deep=True).reset_index(drop=True)
     work["__source_order"] = range(len(work))
-    duplicates = work[key].astype("string").ne("") & work.duplicated(key, keep="first")
-    return work.loc[~duplicates].copy(), work.loc[duplicates].copy()
+    keys = [key, '商品编码'] + [c for c in ('行号', '仓库', '单位') if c in work and work[c].ne('').any()]
+    return deduplicate_events(work, keys, label='库存单据明细', ignore=('说明', '源工作表', '__source_order'))
 
 
 def _infer_as_of_date(frames: Sequence[pd.DataFrame], fallback_dates: Sequence[pd.Series]) -> pd.Timestamp:
@@ -191,6 +182,8 @@ def build_inventory_management_report(
     source_names: Sequence[str],
     recent_days: int = 30,
     overstock_multiplier: float = 1.5,
+    as_of_date: str | None = None,
+    period_start: str | None = None,
 ) -> InventoryReportResult:
     """Clean the movement tables and produce an auditable inventory report."""
 
@@ -224,11 +217,13 @@ def build_inventory_management_report(
         "locked": ("已锁定", "锁定库存"), "bad": ("不良品", "不良库存"), "remark": ("备注",),
     })
     purchase_cols = _frame_columns(purchase_frame, {
+        "line": ('行号', '明细行号'), 'unit': ('采购单位', '计量单位', '单位'), 'warehouse': ('仓库', '仓库编码'),
         "date": ("入库日期", "采购日期", "日期"), "doc": ("入库单号", "采购单号"),
         "code": ("商品编码", "产品编码", "SKU"), "quantity": ("入库数量", "采购数量", "数量"),
         "price": ("采购价", "采购单价"), "supplier": ("供应商",), "status": ("状态",), "remark": ("备注",),
     })
     sales_cols = _frame_columns(sales_frame, {
+        "line": ('行号', '明细行号'), 'unit': ('出库单位', '计量单位', '单位'), 'warehouse': ('仓库', '仓库编码'),
         "date": ("出库日期", "销售日期", "日期"), "doc": ("出库单号", "销售单号", "订单号"),
         "code": ("商品编码", "产品编码", "SKU"), "name": ("商品名称", "产品名称"),
         "quantity": ("数量", "出库数量", "销售数量"), "sales": ("销售额", "销售金额"),
@@ -256,7 +251,7 @@ def build_inventory_management_report(
             "目标库存天数": _parse_number(row.get(product_cols["target_days"])),
             "商品状态": _clean_text(row.get(product_cols["status"])),
         })
-    products = pd.DataFrame(product_rows).drop_duplicates("商品编码", keep="first").reset_index(drop=True)
+    products = unique_master(pd.DataFrame(product_rows), ['商品编码'], label='商品资料').reset_index(drop=True)
     if products.empty:
         raise ValueError("商品资料表没有可用商品编码")
     product_codes = set(products["商品编码"])
@@ -270,18 +265,23 @@ def build_inventory_management_report(
             "不良品": _parse_number(row.get(opening_cols["bad"])),
         })
     opening = pd.DataFrame(opening_rows)
-    for column in ("期初库存", "已锁定", "不良品"):
-        opening[column] = opening[column].fillna(0.0)
-    opening = opening.groupby("商品编码", as_index=False, observed=True)[["期初库存", "已锁定", "不良品"]].sum()
+    unknown_codes = set(opening.loc[opening[['期初库存', '已锁定', '不良品']].isna().any(axis=1), '商品编码'])
+    opening = opening.groupby('商品编码', as_index=False, observed=True)[['期初库存', '已锁定', '不良品']].agg(complete_sum)
 
     audit_rows: list[dict[str, Any]] = []
     review_rows: list[dict[str, Any]] = []
+    for code in unknown_codes:
+        review_rows.append({'业务类型': '期初库存', '商品编码': code, '原因': '期初或受限库存缺失，相关库存与建议不可计算', '处理结果': '待核验'})
+    unit_column = _find_column(product_frame, ('基础单位', '计量单位', '单位'))
+    stock_units = dict(zip(product_frame[product_cols['code']].map(_clean_code), product_frame[unit_column].map(_clean_text))) if unit_column else {}
 
     purchase_rows = []
     for _, row in purchase_frame.iterrows():
         quantity = _parse_number(row.get(purchase_cols["quantity"]))
         price = _parse_number(row.get(purchase_cols["price"]))
         purchase_rows.append({
+            '行号': _clean_text(row.get(purchase_cols['line'])), '仓库': _clean_text(row.get(purchase_cols['warehouse'])),
+            '单位': _clean_text(row.get(purchase_cols['unit'])),
             "日期": _parse_date(row.get(purchase_cols["date"])), "单据编号": _clean_code(row.get(purchase_cols["doc"])),
             "商品编码": _clean_code(row.get(purchase_cols["code"])), "数量": quantity, "单价": price,
             "金额": quantity * price if pd.notna(quantity) and pd.notna(price) else float("nan"),
@@ -295,8 +295,12 @@ def build_inventory_management_report(
     purchase_status = purchases["状态"].astype("string")
     purchase_known = purchases["商品编码"].isin(product_codes)
     purchase_valid_qty = purchases["数量"].notna() & purchases["数量"].gt(0)
-    received_mask = purchase_status.str.contains("已入库", na=False) & purchase_known & purchase_valid_qty
-    transit_mask = purchase_status.str.contains("待入库", na=False) & purchase_known & purchase_valid_qty
+    received_state = purchase_status.map(classify_receipt_status).eq(RECEIPT_CONFIRMED)
+    bad_unit = purchases.apply(lambda r: bool(r['单位']) and r['单位'] != stock_units.get(r['商品编码'], ''), axis=1)
+    purchase_valid_qty &= ~bad_unit
+    purchase_unknown = received_state & purchase_known & ~purchase_valid_qty
+    received_mask = received_state & purchase_known & purchase_valid_qty
+    transit_mask = purchase_status.str.fullmatch('待入库|待验收|在途', na=False) & purchase_known & purchase_valid_qty
     for index, row in purchases.loc[~received_mask & ~transit_mask].iterrows():
         reasons = []
         if not purchase_known.loc[index]: reasons.append("商品编码不在商品资料")
@@ -310,6 +314,8 @@ def build_inventory_management_report(
     sales_rows = []
     for _, row in sales_frame.iterrows():
         sales_rows.append({
+            '行号': _clean_text(row.get(sales_cols['line'])), '仓库': _clean_text(row.get(sales_cols['warehouse'])),
+            '单位': _clean_text(row.get(sales_cols['unit'])),
             "日期": _parse_date(row.get(sales_cols["date"])), "单据编号": _clean_code(row.get(sales_cols["doc"])),
             "商品编码": _clean_code(row.get(sales_cols["code"])), "数量": _parse_number(row.get(sales_cols["quantity"])),
             "金额": _parse_number(row.get(sales_cols["sales"])), "渠道": _clean_text(row.get(sales_cols["channel"])),
@@ -321,7 +327,11 @@ def build_inventory_management_report(
     sales_status = sales["状态"].astype("string")
     sales_known = sales["商品编码"].isin(product_codes)
     sales_valid_qty = sales["数量"].notna() & sales["数量"].gt(0)
-    completed_mask = sales_status.str.contains("已完成", na=False) & sales_known & sales_valid_qty
+    completed_state = sales_status.map(classify_order_status).eq(ORDER_SUCCESS)
+    bad_unit = sales.apply(lambda r: bool(r['单位']) and r['单位'] != stock_units.get(r['商品编码'], ''), axis=1)
+    sales_valid_qty &= ~bad_unit
+    sales_unknown = completed_state & sales_known & ~sales_valid_qty
+    completed_mask = completed_state & sales_known & sales_valid_qty
     for index, row in sales.loc[~completed_mask].iterrows():
         reasons = []
         if not sales_known.loc[index]: reasons.append("商品编码不在商品资料")
@@ -344,7 +354,9 @@ def build_inventory_management_report(
     adjustments = pd.DataFrame(adjustment_rows)
     adjustment_known = adjustments["商品编码"].isin(product_codes)
     adjustment_valid_qty = adjustments["数量"].notna() & adjustments["数量"].ne(0)
-    confirmed_mask = adjustments["状态"].astype("string").str.contains("已确认", na=False) & adjustment_known & adjustment_valid_qty
+    adjustment_state = adjustments['状态'].map(classify_adjustment_status).eq(ADJUSTMENT_CONFIRMED)
+    adjustment_unknown = adjustment_state & adjustment_known & ~adjustment_valid_qty
+    confirmed_mask = adjustment_state & adjustment_known & adjustment_valid_qty
     for index, row in adjustments.loc[~confirmed_mask].iterrows():
         reasons = []
         if not adjustment_known.loc[index]: reasons.append("商品编码不在商品资料")
@@ -359,7 +371,25 @@ def build_inventory_management_report(
     transit = purchases.loc[transit_mask].copy()
     completed_sales = sales.loc[completed_mask].copy()
     confirmed_adjustments = adjustments.loc[confirmed_mask].copy()
-    as_of_date = _infer_as_of_date(frames, [purchases["日期"], sales["日期"], adjustments["日期"]])
+    available_cutoff = _infer_as_of_date(frames, [purchases["日期"], sales["日期"], adjustments["日期"]])
+    requested_cutoff = pd.Timestamp(as_of_date).normalize() if as_of_date else available_cutoff
+    as_of_date = min(available_cutoff, requested_cutoff)
+    for events, unknown in ((purchases, purchase_unknown), (sales, sales_unknown), (adjustments, adjustment_unknown)):
+        in_closing = events['日期'].isna() | events['日期'].le(as_of_date)
+        unknown_codes.update(events.loc[unknown & in_closing, '商品编码'])
+    if period_start and pd.Timestamp(period_start) > as_of_date:
+        raise ValueError('指定期间晚于可用库存数据截止日，不能生成该期间确定库存')
+    eligible = []
+    for label, events in (('采购', received), ('在途', transit), ('销售', completed_sales), ('库存调整', confirmed_adjustments)):
+        included, outside = through_cutoff(events, '日期', as_of_date)
+        for _, row in outside.iterrows():
+            item = {'业务类型': label, **row.to_dict(), '原因': row['期间排除原因'], '处理结果': '不计入本期库存'}
+            audit_rows.append(item)
+            if pd.isna(row['日期']):
+                unknown_codes.add(row['商品编码'])
+                review_rows.append(item)
+        eligible.append(included)
+    received, transit, completed_sales, confirmed_adjustments = eligible
     recent_start = as_of_date - pd.Timedelta(days=recent_days - 1)
 
     def grouped_sum(frame: pd.DataFrame, value: str, output: str) -> pd.DataFrame:
@@ -375,19 +405,20 @@ def build_inventory_management_report(
         analysis = analysis.merge(grouped_sum(frame, value, output), on="商品编码", how="left")
     recent_sales = completed_sales.loc[completed_sales["日期"].between(recent_start, as_of_date, inclusive="both")]
     analysis = analysis.merge(grouped_sum(recent_sales, "数量", "近30天销量"), on="商品编码", how="left")
-    numeric_fill = ["期初库存", "已锁定", "不良品", "已入库数量", "已出库数量", "已确认调整", "在途数量", "近30天销量"]
+    numeric_fill = ["已入库数量", "已出库数量", "已确认调整", "在途数量", "近30天销量"]
     for column in numeric_fill:
         analysis[column] = analysis[column].fillna(0.0)
     analysis["当前账面库存"] = analysis["期初库存"] + analysis["已入库数量"] - analysis["已出库数量"] + analysis["已确认调整"]
+    analysis.loc[analysis['商品编码'].isin(unknown_codes), '当前账面库存'] = float('nan')
     analysis["可销售库存"] = analysis["当前账面库存"] - analysis["已锁定"] - analysis["不良品"]
     analysis["近30天日均销量"] = analysis["近30天销量"] / float(recent_days)
     analysis["可售库存天数"] = analysis["可销售库存"].div(analysis["近30天日均销量"].where(analysis["近30天日均销量"].gt(0)))
     analysis["补货触发库存"] = (
         analysis["安全库存"] + analysis["近30天日均销量"] * analysis["采购提前期(天)"]
-    ).map(math.ceil)
+    ).map(lambda x: math.ceil(x) if pd.notna(x) else float('nan'))
     analysis["目标库存量"] = (
         analysis["安全库存"] + analysis["近30天日均销量"] * analysis["目标库存天数"]
-    ).map(math.ceil)
+    ).map(lambda x: math.ceil(x) if pd.notna(x) else float('nan'))
     normal_product = ~analysis["商品状态"].astype("string").str.contains("停售", na=False)
     shortage = normal_product & (analysis["可销售库存"] <= analysis["补货触发库存"])
     analysis["建议补货量"] = 0.0
@@ -406,11 +437,15 @@ def build_inventory_management_report(
     analysis.loc[discontinued, "积压数量"] = analysis.loc[discontinued, "可销售库存"].clip(lower=0).map(math.floor)
     analysis["可售库存金额"] = analysis["可销售库存"] * analysis["采购单价"]
     analysis["积压金额"] = analysis["积压数量"] * analysis["采购单价"]
+    unavailable = analysis[['可销售库存', '安全库存', '采购提前期(天)', '目标库存天数']].isna().any(axis=1)
+    analysis.loc[unavailable, ['建议补货量', '积压数量', '积压金额']] = float('nan')
 
     statuses = []
     suggestions = []
     for _, row in analysis.iterrows():
-        if row["可销售库存"] < 0:
+        if pd.isna(row['可销售库存']) or any(pd.isna(row[c]) for c in ('安全库存', '采购提前期(天)', '目标库存天数')):
+            status, suggestion = '待核验', '缺少完整期初、单位或有效流水证据；不生成确定补货/积压数量'
+        elif row["可销售库存"] < 0:
             status, suggestion = "库存异常", "核对出入库和调整单据，避免负库存"
         elif "停售" in str(row["商品状态"]):
             status = "停售积压" if row["可销售库存"] > 0 else "停售清零"
@@ -450,6 +485,12 @@ def build_inventory_management_report(
     excess_columns = ["商品编码", "商品名称", "品类", "商品状态", "可销售库存", "近30天销量", "可售库存天数", "目标库存天数", "积压数量", "采购单价", "积压金额", "管理建议"]
     excess = analysis.loc[analysis["积压数量"].gt(0), excess_columns].sort_values("积压金额", ascending=False, kind="stable").reset_index(drop=True)
 
+    # Closing stock uses the full ledger after opening. Period flow measures
+    # use the report window separately; cutting the ledger at month start
+    # would lose receipts/outflows needed to carry forward the opening stock.
+    if period_start:
+        received = received.loc[received['日期'].ge(pd.Timestamp(period_start))].copy()
+        completed_sales = completed_sales.loc[completed_sales['日期'].ge(pd.Timestamp(period_start))].copy()
     purchase_summary = products[["商品编码", "商品名称", "品类", "供应商"]].copy()
     purchase_agg = received.groupby("商品编码", as_index=False, observed=True).agg(已入库数量=("数量", "sum"), 已入库金额=("金额", "sum"), 已入库单数=("单据编号", "nunique"))
     transit_agg = transit.groupby("商品编码", as_index=False, observed=True).agg(在途数量=("数量", "sum"), 在途金额=("金额", "sum"))
@@ -489,15 +530,15 @@ def build_inventory_management_report(
     reviews = reviews[audit_columns[1:]].reset_index(drop=True)
 
     period_purchase_qty = float(received["数量"].sum())
-    period_purchase_amount = float(received["金额"].sum())
+    period_purchase_amount = complete_sum(received['金额'])
     period_sales_qty = float(completed_sales["数量"].sum())
-    period_sales_amount = float(completed_sales["金额"].sum())
+    period_sales_amount = complete_sum(completed_sales['金额'])
     completed_with_cost = completed_sales.merge(products[["商品编码", "采购单价"]], on="商品编码", how="left")
-    estimated_cogs = float((completed_with_cost["数量"] * completed_with_cost["采购单价"]).sum())
+    estimated_cogs = complete_sum(completed_with_cost['数量'] * completed_with_cost['采购单价'])
     estimated_profit = period_sales_amount - estimated_cogs
-    current_qty = float(analysis["当前账面库存"].sum())
-    available_qty = float(analysis["可销售库存"].sum())
-    available_value = float(analysis["可售库存金额"].sum())
+    current_qty = complete_sum(analysis['当前账面库存'])
+    available_qty = complete_sum(analysis['可销售库存'])
+    available_value = complete_sum(analysis['可售库存金额'])
     replenish_count = int(analysis["建议补货量"].gt(0).sum())
     excess_count = int(analysis["积压数量"].gt(0).sum())
     excess_value = float(analysis["积压金额"].sum())
@@ -518,6 +559,9 @@ def build_inventory_management_report(
         {"指标": "停售库存金额", "结果": discontinued_value, "单位": "元", "数据口径": "停售商品可销售库存×采购单价"},
         {"指标": "人工核验事项", "结果": len(reviews), "单位": "项", "数据口径": "退货、数量缺失、待确认调整、未知商品或负库存"},
     ])
+    if period_start:
+        overview.loc[len(overview)] = {'指标': '流量统计起始日期', '结果': pd.Timestamp(period_start), '单位': '',
+            '数据口径': '采购/销售期间流量按此起始日；期末库存仍使用完整期初及累计流水'}
 
     purchase_monthly = received.assign(月份=received["日期"].dt.to_period("M").astype(str)).groupby("月份", as_index=False, observed=True)["数量"].sum().rename(columns={"数量": "采购入库数量"})
     sales_monthly = completed_sales.assign(月份=completed_sales["日期"].dt.to_period("M").astype(str)).groupby("月份", as_index=False, observed=True)["数量"].sum().rename(columns={"数量": "销售出库数量"})
@@ -557,7 +601,11 @@ def build_inventory_management_report(
         "manual_review_count": len(reviews), "audit_issue_count": len(audit_rows),
         "sheet_count": len(outputs), "chart_count": 3,
     }
-    return InventoryReportResult(outputs=outputs, report=report)
+    report['constraint_checks'] = [{'item': '库存完整证据覆盖', 'status': 'passed' if analysis['当前账面库存'].notna().all() else 'needs_review'},
+                                   {'item': '库存流水截止日', 'status': 'passed'},
+                                   {'item': '请求截止日数据覆盖', 'status': 'passed' if available_cutoff >= requested_cutoff else 'needs_review'}]
+    report['period_start'] = str(pd.Timestamp(period_start).date()) if period_start else None
+    return InventoryReportResult(outputs=outputs, report=public_evidence(report))
 
 
 __all__ = [

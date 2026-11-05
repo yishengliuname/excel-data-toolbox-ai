@@ -16,6 +16,8 @@ from typing import Any
 
 import pandas as pd
 
+from .business_kernel import complete_sum, unique_master, number, parse_numeric_values, public_evidence
+
 
 _NON_WORD = re.compile(r"[\s_\-（）()【】\[\]：:]+")
 
@@ -120,20 +122,7 @@ def _clean_code(value: Any) -> str:
 
 
 def _number(value: Any) -> float:
-    if value is None or (not isinstance(value, str) and pd.isna(value)):
-        return float("nan")
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
-    text = re.sub(r"[¥￥元,%％,\s]", "", _clean_text(value))
-    if not text:
-        return float("nan")
-    try:
-        result = float(text)
-    except ValueError:
-        return float("nan")
-    if "%" in _clean_text(value) or "％" in _clean_text(value):
-        result /= 100.0
-    return result
+    return number(value)
 
 
 def _columns(frame: pd.DataFrame, mapping: Mapping[str, Sequence[str]]) -> dict[str, str | None]:
@@ -212,7 +201,7 @@ def build_hr_management_report(
     duplicate_employees = employees[employees["员工编号"].ne("") & employees.duplicated("员工编号", keep="first")]
     for _, row in duplicate_employees.iterrows():
         review_rows.append({"员工编号": row["员工编号"], "姓名": row["姓名"], "事项类型": "主档重复", "严重程度": "高", "事实依据": "员工编号在基础信息中重复", "建议动作": "核对唯一员工主档并合并重复记录", "源工作表": names[roles["employees"]]})
-    employees = employees.loc[employees["员工编号"].ne("")].drop_duplicates("员工编号", keep="first").reset_index(drop=True)
+    employees = unique_master(employees.loc[employees['员工编号'].ne('')], ['员工编号'], label='员工主档').reset_index(drop=True)
     known_codes = set(employees["员工编号"])
 
     attendance = pd.DataFrame({
@@ -224,11 +213,11 @@ def build_hr_management_report(
         "请假天数": attendance_frame[att_cols["leave"]].map(_number),
         "加班小时": attendance_frame[att_cols["overtime"]].map(_number) if att_cols["overtime"] else 0.0,
         "源工作表": attendance_frame["__源工作表"],
-    }).fillna({"出勤天数": 0, "迟到次数": 0, "早退次数": 0, "请假天数": 0, "加班小时": 0})
+    })
     performance = pd.DataFrame({
         "员工编号": performance_frame[perf_cols["code"]].map(_clean_code),
         "销售额": performance_frame[perf_cols["sales"]].map(_number) if perf_cols["sales"] else 0.0,
-        "目标完成率": performance_frame[perf_cols["target"]].map(_number),
+        "目标完成率": parse_numeric_values(performance_frame[perf_cols["target"]], allow_percent=True).astype('float64'),
         "客户评分": performance_frame[perf_cols["rating"]].map(_number),
         "源工作表": performance_frame["__源工作表"],
     })
@@ -238,7 +227,11 @@ def build_hr_management_report(
         "调整金额": adjustment_frame[adj_cols["amount"]].map(_number),
         "备注": adjustment_frame[adj_cols["remark"]].map(_clean_text) if adj_cols["remark"] else "",
         "源工作表": adjustment_frame["__源工作表"],
-    }).fillna({"调整金额": 0.0})
+    })
+    for _, row in adjustments.loc[adjustments['调整金额'].isna()].iterrows():
+        review_rows.append({'员工编号': row['员工编号'], '姓名': '', '事项类型': '薪资调整金额无效',
+            '严重程度': '高', '事实依据': '存在调整记录但金额无法解析，不能按零计算',
+            '建议动作': '核对调整金额与审批单', '源工作表': row['源工作表']})
 
     for label, frame in (("考勤", attendance), ("绩效", performance), ("薪资调整", adjustments)):
         for _, row in frame.loc[~frame["员工编号"].isin(known_codes)].iterrows():
@@ -247,19 +240,23 @@ def build_hr_management_report(
 
     periods = max(int(attendance["月份"].replace("", pd.NA).nunique(dropna=True)), 1)
     att = attendance.groupby("员工编号", as_index=False, observed=True).agg(
-        月份数=("月份", "nunique"), 出勤天数=("出勤天数", "sum"), 迟到次数=("迟到次数", "sum"),
-        早退次数=("早退次数", "sum"), 请假天数=("请假天数", "sum"), 加班小时=("加班小时", "sum"),
+        月份数=("月份", "nunique"), 出勤天数=("出勤天数", complete_sum), 迟到次数=("迟到次数", complete_sum),
+        早退次数=("早退次数", complete_sum), 请假天数=("请假天数", complete_sum), 加班小时=("加班小时", complete_sum),
     )
     perf = performance.groupby("员工编号", as_index=False, observed=True).agg(
-        销售额=("销售额", "sum"), 目标完成率=("目标完成率", "mean"), 客户评分=("客户评分", "mean"),
+        销售额=("销售额", complete_sum), 目标完成率=("目标完成率", "mean"), 客户评分=("客户评分", "mean"),
     )
     adj = adjustments.groupby("员工编号", as_index=False, observed=True).agg(
-        薪资调整金额=("调整金额", "sum"), 调整项目数=("调整类型", "count"),
+        薪资调整金额=("调整金额", complete_sum), 调整项目数=("调整类型", "count"),
         调整项目=("调整类型", lambda values: "、".join(dict.fromkeys(item for item in values if item))),
     )
     detail = employees.merge(att, on="员工编号", how="left").merge(perf, on="员工编号", how="left").merge(adj, on="员工编号", how="left")
     for column in ("月份数", "出勤天数", "迟到次数", "早退次数", "请假天数", "加班小时", "销售额", "薪资调整金额", "调整项目数"):
         detail[column] = detail[column].fillna(0.0)
+    invalid_adjustments = set(adjustments.loc[adjustments['调整金额'].isna(), '员工编号'])
+    invalid_sales = set(performance.loc[performance['销售额'].isna(), '员工编号'])
+    detail.loc[detail['员工编号'].isin(invalid_adjustments), '薪资调整金额'] = float('nan')
+    detail.loc[detail['员工编号'].isin(invalid_sales), '销售额'] = float('nan')
     detail["统计月份数"] = detail["月份数"].where(detail["月份数"].gt(0), periods)
     detail["应出勤天数"] = detail["统计月份数"] * float(expected_workdays)
     detail["缺勤天数"] = (detail["应出勤天数"] - detail["出勤天数"] - detail["请假天数"]).clip(lower=0)
@@ -271,6 +268,9 @@ def build_hr_management_report(
         detail["目标完成率"].clip(lower=0, upper=1) * 70 + detail["客户评分"].clip(lower=0, upper=5).div(5) * 30
     )
     detail.loc[detail["目标完成率"].isna() | detail["客户评分"].isna(), "绩效得分"] = float("nan")
+    attendance_valid = attendance.groupby('员工编号')[['出勤天数', '迟到次数', '早退次数', '请假天数', '加班小时']].apply(lambda g: g.notna().all(axis=None)).to_dict()
+    attendance_available = detail['员工编号'].map(attendance_valid).fillna(False).astype(bool)
+    detail.loc[~attendance_available, ['出勤天数', '迟到次数', '早退次数', '请假天数', '加班小时', '出勤率', '缺勤天数', '考勤得分']] = float('nan')
     detail["综合得分"] = detail["考勤得分"] * 0.3 + detail["绩效得分"] * 0.7
     detail["预计薪资"] = detail["基本工资"] * detail["统计月份数"] + detail["薪资调整金额"]
     detail["在职标记"] = ~detail["状态"].astype("string").str.contains("离职|停职", na=False)
@@ -293,6 +293,12 @@ def build_hr_management_report(
     detail.loc[medium_proxy, "离职风险代理等级"] = "中"
     detail.loc[high_proxy, "离职风险代理等级"] = "高"
     detail.loc[~detail["在职标记"], "离职风险代理等级"] = "不适用"
+    detail.loc[~attendance_available & detail['在职标记'], '管理分类'] = '数据待补充'
+    detail.loc[~attendance_available & detail['在职标记'], '离职风险代理等级'] = '待核验'
+    for _, row in detail.loc[~attendance_available].iterrows():
+        review_rows.append({'员工编号': row['员工编号'], '姓名': row['姓名'], '事项类型': '考勤证据缺失或无效',
+            '严重程度': '中', '事实依据': '没有完整有效考勤，不能视为缺勤或据此评价离职风险',
+            '建议动作': '补齐考勤并确认工作日历后重新评价', '源工作表': '考勤记录'})
 
     reasons: list[str] = []
     actions: list[str] = []
@@ -303,10 +309,12 @@ def build_hr_management_report(
         if pd.notna(row["目标完成率"]) and row["目标完成率"] < 0.8: facts.append(f"目标完成率{row['目标完成率']:.0%}")
         if pd.notna(row["客户评分"]) and row["客户评分"] < 4: facts.append(f"客户评分{row['客户评分']:.1f}")
         if pd.notna(row["综合得分"]): facts.append(f"综合得分{row['综合得分']:.1f}")
+        if row['管理分类'] == '数据待补充': facts.append('考勤证据缺失，综合评价不可计算')
         reasons.append("；".join(facts) or "考勤与绩效未触发预警")
         if row["管理分类"] == "表现优秀": actions.append("纳入表扬/激励候选，并结合岗位成果做主管复核")
         elif row["管理分类"] == "重点关注": actions.append("安排直属主管面谈，核实考勤与绩效原因并制定30天改进计划")
         elif not row["在职标记"]: actions.append("核对离职日期与当月考勤、薪资结算是否一致")
+        elif row['管理分类'] == '数据待补充': actions.append('补齐考勤与工作日历，不依据缺失数据作人员处置')
         else: actions.append("保持常规跟踪")
     detail["事实依据"] = reasons
     detail["建议动作"] = actions
@@ -357,7 +365,7 @@ def build_hr_management_report(
         {"指标": "统计月份", "结果": "、".join(sorted(attendance["月份"].dropna().astype(str).unique())), "单位": "", "数据口径": "考勤记录中的月份"},
         {"指标": "员工总数", "结果": len(employees), "单位": "人", "数据口径": "员工主档按员工编号去重"},
         {"指标": "在职员工数", "结果": int(detail["在职标记"].sum()), "单位": "人", "数据口径": "状态不含离职/停职"},
-        {"指标": "预计在职薪资", "结果": float(active["预计薪资"].sum()), "单位": "元", "数据口径": "基本工资×统计月份数+薪资调整金额"},
+        {"指标": "预计在职薪资", "结果": complete_sum(active["预计薪资"]), "单位": "元", "数据口径": "基本工资×统计月份数+薪资调整金额；缺失金额不按零"},
         {"指标": "平均出勤率", "结果": float(active["出勤率"].mean()), "单位": "%", "数据口径": "在职员工出勤率算术平均"},
         {"指标": "平均目标完成率", "结果": float(active["目标完成率"].mean()), "单位": "%", "数据口径": "在职且有绩效记录员工算术平均"},
         {"指标": "平均综合得分", "结果": float(scored["综合得分"].mean()), "单位": "分", "数据口径": "考勤30%+绩效70%"},
@@ -365,12 +373,12 @@ def build_hr_management_report(
         {"指标": "表现优秀员工", "结果": int(excellent.sum()), "单位": "人", "数据口径": f"综合≥{excellent_score:g}、迟到≤1且无缺勤"},
         {"指标": "重点关注员工", "结果": int(attention.sum()), "单位": "人", "数据口径": "综合/考勤/绩效任一触发保守预警"},
         {"指标": "高风险代理人数", "结果": int(high_proxy.sum()), "单位": "人", "数据口径": "综合<60、迟到≥8或出勤率<75%；非真实离职预测"},
-        {"指标": "迟到总次数", "结果": float(active["迟到次数"].sum()), "单位": "次", "数据口径": "仅在职员工统计期汇总"},
+        {"指标": "迟到总次数", "结果": complete_sum(active["迟到次数"]), "单位": "次", "数据口径": "仅在职员工统计期汇总；考勤缺失不按零"},
         {"指标": "人工核验事项", "结果": len(reviews), "单位": "项", "数据口径": "数据冲突与完整性异常"},
     ])
 
     dept = active.groupby("部门", as_index=False, observed=True).agg(
-        在职人数=("员工编号", "count"), 预计薪资=("预计薪资", "sum"), 平均综合得分=("综合得分", "mean")
+        在职人数=("员工编号", "count"), 预计薪资=("预计薪资", complete_sum), 平均综合得分=("综合得分", "mean")
     ).sort_values("预计薪资", ascending=False, kind="stable")
     employee_chart = scored[["姓名", "综合得分"]].sort_values("综合得分", ascending=False, kind="stable")
     risk = active.groupby("离职风险代理等级", as_index=False, observed=True)["员工编号"].count().rename(columns={"员工编号": "风险人数"})
@@ -400,13 +408,17 @@ def build_hr_management_report(
         output.attrs["toolbox_report_kind"] = "hr_management_report"
     report = {
         "employee_count": len(employees), "active_employee_count": int(detail["在职标记"].sum()),
-        "expected_active_payroll": float(active["预计薪资"].sum()), "average_attendance_rate": float(active["出勤率"].mean()),
+        "expected_active_payroll": complete_sum(active["预计薪资"]), "average_attendance_rate": float(active["出勤率"].mean()),
         "average_composite_score": float(scored["综合得分"].mean()), "top_employee": top_name,
         "excellent_count": int(excellent.sum()), "attention_count": int(attention.sum()),
         "high_proxy_risk_count": int(high_proxy.sum()), "manual_review_count": len(reviews),
         "sheet_count": len(outputs), "chart_count": 4,
+        "constraint_checks": [
+            {'item': '在职员工考勤证据完整', 'status': 'passed' if attendance_available.loc[detail['在职标记']].all() else 'needs_review'},
+            {'item': '在职薪资金额完整', 'status': 'passed' if active['预计薪资'].notna().all() else 'needs_review'},
+        ],
     }
-    return HRReportResult(outputs=outputs, report=report)
+    return HRReportResult(outputs=outputs, report=public_evidence(report))
 
 
 __all__ = [

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from decimal import Decimal
 
 import pandas as pd
 import pytest
@@ -35,6 +36,26 @@ def _result():
     )
 
 
+def _source_cash_control(result):
+    """Independent source-ledger control, not the writer's rounded allocation.
+
+    The old fixed answer included a 0.02 allocation drift. Source refund cents
+    are authoritative; never relax tolerance just to keep that old answer green.
+    """
+    tables = load_tables_from_files(CASE001)
+    raw = tables[result.report['source_roles']['refund']]
+    columns = result.report['columns']
+    detail = result.outputs['清洗明细']
+    ids = raw[columns['refund_order_id']].astype('string').str.replace(r'\s+', '', regex=True).str.upper()
+    matched = raw.loc[ids.isin(set(detail['订单号'])), columns['refund_refund_amount']]
+    refund = sum((Decimal(str(v)) for v in pd.to_numeric(matched, errors='raise')), Decimal(0))
+    gross = sum((Decimal(str(v)) for v in detail['销售额']), Decimal(0))
+    discount = sum((Decimal(str(v)) for v in detail['优惠金额']), Decimal(0))
+    cost = sum((Decimal(str(q)) * Decimal(str(p)) for q, p in zip(detail['数量'], detail['成本价'])), Decimal(0))
+    net = gross - discount - refund
+    return {'refund': float(refund), 'net': float(net), 'profit': float(net - cost)}
+
+
 def test_case001_business_results_match_ground_truth() -> None:
     result = _result()
     report = result.report
@@ -44,11 +65,12 @@ def test_case001_business_results_match_ground_truth() -> None:
     assert report["deduplicated_rows"] == 1097
     assert report["valid_rows"] == 1030
     assert report["excluded_rows"] == 95
-    assert report["net_sales"] == pytest.approx(12131.87, abs=0.01)
-    assert report["gross_profit"] == pytest.approx(5534.47, abs=0.01)
+    control = _source_cash_control(result)
+    assert report["net_sales"] == pytest.approx(control['net'], abs=1e-9)
+    assert report["gross_profit"] == pytest.approx(control['profit'], abs=1e-9)
     assert report["gross_margin"] == pytest.approx(0.4562, abs=0.0001)
     assert report["valid_orders"] == 681
-    assert report["refund_amount"] == pytest.approx(426.02, abs=0.01)
+    assert report["refund_amount"] == pytest.approx(control['refund'], abs=1e-9)
     assert set(report["stores"]) == {"盐城一店", "盐城二店", "亭湖店"}
 
 
@@ -71,7 +93,7 @@ def test_case001_outputs_are_canonical_and_auditable() -> None:
     assert cleaned["商品编码"].str.fullmatch(r"P\d{3}").all()
     assert cleaned["商品名称"].notna().all()
     assert cleaned["类目"].notna().all()
-    assert cleaned["毛利"].sum() == pytest.approx(5534.47, abs=0.01)
+    assert cleaned["毛利"].sum() == pytest.approx(_source_cash_control(result)['profit'], abs=1e-9)
 
     excluded = result.outputs["异常数据"]
     assert len(excluded) == 95
@@ -106,7 +128,7 @@ def test_case001_export_is_reopenable_styled_and_charted(tmp_path: Path) -> None
     assert acceptance.status == "passed"
     workbook_acceptance = verify_customer_order_workbook(str(output))
     assert workbook_acceptance["status"] == "passed"
-    assert workbook_acceptance["net_sales"] == pytest.approx(12131.87)
+    assert workbook_acceptance["net_sales"] == pytest.approx(_source_cash_control(result)['net'], abs=1e-9)
     workbook = load_workbook(output, data_only=False)
     assert list(workbook.sheetnames) == list(result.outputs)
     assert len(workbook["图表看板"]._charts) == 4
@@ -174,4 +196,5 @@ def test_customer_order_operation_runs_through_validated_agent_plan() -> None:
 
     assert plan.status == "ready"
     assert result.reports["order_analysis"]["validation_status"] == "passed"
-    assert result.tables["管理看板"].iloc[0]["结果"] == pytest.approx(12131.87)
+    control = _source_cash_control(_result())
+    assert result.tables["管理看板"].iloc[0]["结果"] == pytest.approx(control['net'], abs=1e-9)

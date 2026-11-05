@@ -19,7 +19,8 @@ from typing import Any
 import pandas as pd
 from openpyxl import load_workbook
 
-from .status_semantics import ORDER_INVALID, ORDER_SUCCESS, UNKNOWN, classify_order_status
+from .status_semantics import ORDER_INVALID, ORDER_SUCCESS, UNKNOWN, REFUND_CONFIRMED, classify_order_status, classify_refund_status
+from .business_kernel import numbers, allocate_money, deduplicate_events
 
 
 _HEADER_SEPARATORS = re.compile(r"[\s_\-()（）\[\]【】/:.：]+")
@@ -47,6 +48,8 @@ _ALIASES: Mapping[str, tuple[str, ...]] = {
     "refund_amount": ("退款金额", "退款额", "退货金额", "refundamount", "refund"),
     "refund_date": ("退款时间", "退款日期", "refunddate"),
     "refund_reason": ("退款原因", "退货原因", "refundreason"),
+    "refund_status": ("退款状态", "售后状态", "状态", "refundstatus"),
+    "refund_id": ("退款单号", "售后单号", "退款编号", "refundid"),
     "target_amount": (
         "净销售额目标",
         "销售额目标",
@@ -100,10 +103,7 @@ def _find_target_amount(frame: pd.DataFrame) -> str | None:
 
 
 def _numeric(series: pd.Series) -> pd.Series:
-    cleaned = series.map(
-        lambda value: re.sub(r"[,，￥¥%\s]", "", _text(value)) if isinstance(value, str) else value
-    )
-    return pd.to_numeric(cleaned, errors="coerce")
+    return numbers(series)
 
 
 def _parse_dates(series: pd.Series) -> pd.Series:
@@ -465,15 +465,22 @@ def build_customer_order_analysis(
 
     discount_column = sales_columns.get("discount")
     discount = _numeric(valid[str(discount_column)]) if discount_column else pd.Series(0.0, index=valid.index)
-    discount = discount.fillna(0.0)
+    if discount.isna().any():
+        raise ValueError('优惠金额存在缺失或无效数值；不能按零优惠继续计算')
     invalid_discount = discount.lt(0)
     if bool(invalid_discount.any()):
         raise ValueError("优惠金额存在负数，无法在未确认业务口径时继续")
     valid["销售额"] = (valid["数量_数值"] * valid["单价_数值"]).round(2)
     valid["优惠金额_数值"] = discount.round(2)
+    over_discount = valid['优惠金额_数值'] > valid['销售额']
 
     refund_total_by_order = pd.Series(dtype="float64")
     refund_review_parts: list[pd.DataFrame] = []
+    if over_discount.any():
+        provisional = valid.loc[over_discount].copy()
+        provisional.insert(0, '人工核验原因', '优惠超过商品行销售额，须确认订单/行粒度；当前结果为阶段记录')
+        refund_review_parts.append(provisional)
+        warnings.append('存在优惠超过商品行销售额的记录，须确认优惠分摊口径；不据此生成确定经营结论')
     refund_source_rows = 0
     if binding.refund_index is not None:
         refund_source = local_frames[binding.refund_index].copy(deep=True)
@@ -483,7 +490,24 @@ def build_customer_order_analysis(
         refund_work = refund_source.copy(deep=True)
         refund_work["订单号_标准"] = refund_work[refund_order_column].map(_identifier)
         refund_work["退款金额_数值"] = _numeric(refund_work[refund_amount_column])
+        refund_id = binding.columns.get('refund_refund_id')
+        if refund_id:
+            refund_work[str(refund_id)] = refund_work[str(refund_id)].map(_identifier)
+            refund_work, _ = deduplicate_events(refund_work, [str(refund_id)], label='退款流水')
         invalid_refund = refund_work["订单号_标准"].eq("") | refund_work["退款金额_数值"].isna() | refund_work["退款金额_数值"].lt(0)
+        if refund_id:
+            invalid_refund |= refund_work[str(refund_id)].eq('')
+        refund_status = binding.columns.get('refund_refund_status')
+        if refund_status:
+            confirmed = refund_work[str(refund_status)].map(classify_refund_status).eq(REFUND_CONFIRMED)
+            pending = refund_work.loc[~confirmed].copy()
+            if not pending.empty:
+                pending.insert(0, '人工核验原因', '退款未确认发生或状态未知，未冲减收入')
+                refund_review_parts.append(pending)
+            invalid_refund |= ~confirmed
+        else:
+            warnings.append('退款表缺少状态：暂按历史退款流水展示；本表是否均已发生须人工确认')
+            refund_review_parts.append(pd.DataFrame([{'人工核验原因': '退款表缺少状态，须确认是否均为已发生退款', '数据源': names[binding.refund_index]}]))
         if bool(invalid_refund.any()):
             review = refund_work.loc[invalid_refund].copy()
             review.insert(0, "人工核验原因", "退款订单号或退款金额无效")
@@ -499,9 +523,18 @@ def build_customer_order_analysis(
     elif "退款" in user_request:
         raise ValueError("用户要求考虑退款，但未找到包含订单号和退款金额的退款表")
 
-    order_gross = valid.groupby(order_column)["销售额"].transform("sum")
-    order_refund = valid[order_column].map(refund_total_by_order).fillna(0.0)
-    valid["退款金额"] = (order_refund * valid["销售额"] / order_gross).round(2)
+    valid['退款金额'] = 0.0
+    for order, group in valid.groupby(order_column, sort=False):
+        amount = float(refund_total_by_order.get(order, 0.0))
+        # This adapter's declared legacy basis is line sales, not an inferred
+        # refund entitlement. Actual cash events are never silently clipped.
+        weights = group['销售额']
+        if amount == 0:
+            continue
+        if amount > float((group['销售额'] - group['优惠金额_数值']).sum()) + 1e-9:
+            refund_review_parts.append(pd.DataFrame([{'人工核验原因': '退款超过本次订单实付；核验跨期、运费或补偿口径；源现金金额未裁剪', '订单号': order, '退款金额': amount}]))
+            warnings.append('部分退款超过本次订单实付，源退款现金事实保留，相关经营解释待核验')
+        valid.loc[group.index, '退款金额'] = [float(x) for x in allocate_money(amount, weights)]
     valid["净销售额"] = (valid["销售额"] - valid["优惠金额_数值"] - valid["退款金额"]).round(2)
     valid["成本"] = (valid["数量_数值"] * valid["主数据成本价"]).round(2)
     valid["毛利"] = (valid["净销售额"] - valid["成本"]).round(2)
@@ -512,7 +545,7 @@ def build_customer_order_analysis(
             refund_source_rows,
             len(refund_total_by_order),
             refund_source_rows,
-            "同一订单的多条退款先汇总，再按有效商品销售额比例分摊并逐行保留两位小数",
+            "确认退款状态与业务键后汇总；本适配器按商品销售额比例分配最小货币单位并校验总额守恒；超订单实付单列核验",
         )
     )
     audit.append(_audit_row("derive_column", len(valid), len(valid), len(valid), "计算销售额、净销售额、成本、毛利和毛利率"))
@@ -608,7 +641,7 @@ def build_customer_order_analysis(
     )
     audit.append(_audit_row("statistical_warning", len(cleaned), len(cleaned), len(statistical_warnings), "IQR只生成参考预警，不自动排除有效记录"))
 
-    excluded = pd.concat(excluded_parts, ignore_index=True, sort=False) if excluded_parts else pd.DataFrame()
+    excluded = pd.concat(excluded_parts, ignore_index=True, sort=False) if excluded_parts else pd.DataFrame(columns=['异常类型', '排除原因', *original.columns])
     manual_review_parts: list[pd.DataFrame] = []
     review_reason_mask = excluded.get("排除原因", pd.Series(dtype="string")).isin(
         ["门店无法识别", "商品编码无法匹配主数据", "订单状态无法确认", "下单时间无法解析"]
@@ -631,6 +664,7 @@ def build_customer_order_analysis(
     valid_rows = len(cleaned)
 
     checks = [
+        ('有效源退款分摊守恒', math.isclose(refund_amount, float(refund_total_by_order.reindex(cleaned['订单号'].unique()).fillna(0).sum()), abs_tol=1e-9), '源有效订单退款合计与分摊合计独立比较'),
         ("原始行数勾稽", raw_rows == deduplicated_rows + duplicate_rows, f"{raw_rows}={deduplicated_rows}+{duplicate_rows}"),
         ("去重后分流勾稽", deduplicated_rows == valid_rows + (excluded_rows - duplicate_rows), f"{deduplicated_rows}={valid_rows}+{excluded_rows - duplicate_rows}"),
         ("商品主数据匹配", cleaned["商品名称"].notna().all(), "有效明细商品名称非空"),

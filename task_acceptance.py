@@ -15,6 +15,9 @@ def assess_task(result, *, expected_steps, required_topics=()):
         {'item': '待核验事项', 'status': 'passed' if result.get('pending_reviews') == 0 else 'needs_review'},
     ]
     coverage = result.get('request_coverage') or []
+    for constraint in result.get('constraint_checks') or []:
+        checks.append({'item': constraint.get('item', '任务约束'),
+                       'status': 'passed' if constraint.get('status') == 'passed' else 'needs_review'})
     for topic in sorted(set(required_topics)):
         evidence = [c for c in coverage if c.get('topic') == topic]
         status = 'passed' if evidence and all(c.get('status') == 'available' for c in evidence) else 'needs_review'

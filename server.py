@@ -1697,6 +1697,15 @@ def _enterprise_diagnosis_sources(entries: list[TableEntry]) -> list[TableEntry]
     return entries if can_build_enterprise_diagnosis_report(frames) else None
 
 
+def _scope_report_payload(payload, entries, prompt):
+    from excel_data_toolbox.task_contract import compile_scope
+    scope = compile_scope(prompt, [e.frame for e in entries], [e.name for e in entries])
+    if scope.start or scope.entities or scope.top_n is not None:
+        for step in payload.get('steps', []):
+            step['params']['request_scope'] = scope.to_dict()
+    return payload
+
+
 def _sales_report_plan_payload(
     table_id: str,
     columns: dict[str, str],
@@ -3348,6 +3357,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                         "status": "ok",
                         "app": "表格快处 Pro",
                         "version": APP_VERSION,
+                        "business_kernel": "contracts-v1",
                         "storage": "local-persistent-per-task",
                         "retention_days": TASK_RETENTION_DAYS,
                         "port": int(self.server.server_address[1]),
@@ -4150,6 +4160,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         columns: dict[str, str],
         *,
         model: str,
+        prompt: str = '',
     ) -> dict[str, Any]:
         """Build and dry-run the deterministic five-sheet sales report plan."""
 
@@ -4160,7 +4171,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             task_id = SESSION.task_id
         catalog = build_table_catalog(tables, display_names={entry.id: entry.name})
         try:
-            plan = validate_plan(_sales_report_plan_payload(entry.id, columns), catalog)
+            plan = validate_plan(_scope_report_payload(_sales_report_plan_payload(entry.id, columns), [current], prompt), catalog)
             preview = preview_plan(plan, tables)
             dry_run_result = execute_plan(plan, tables, dry_run=True)
         except (PlanValidationError, AgentExecutionError, TypeError, ValueError) as exc:
@@ -4203,6 +4214,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         entries: list[TableEntry],
         *,
         model: str,
+        prompt: str = '',
     ) -> dict[str, Any]:
         """Build and dry-run the deterministic multi-sheet quarterly report."""
 
@@ -4214,7 +4226,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         display_names = {entry.id: entry.name for entry in current_entries}
         catalog = build_table_catalog(tables, display_names=display_names)
         try:
-            plan = validate_plan(_quarterly_sales_plan_payload(current_entries), catalog)
+            plan = validate_plan(_scope_report_payload(_quarterly_sales_plan_payload(current_entries), current_entries, prompt), catalog)
             preview = preview_plan(plan, tables)
             dry_run_result = execute_plan(plan, tables, dry_run=True)
         except (PlanValidationError, AgentExecutionError, TypeError, ValueError) as exc:
@@ -4253,6 +4265,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         entries: list[TableEntry],
         *,
         model: str,
+        prompt: str = '',
     ) -> dict[str, Any]:
         """Build and dry-run the deterministic procurement-sales-inventory report."""
 
@@ -4264,7 +4277,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         display_names = {entry.id: entry.name for entry in current_entries}
         catalog = build_table_catalog(tables, display_names=display_names)
         try:
-            plan = validate_plan(_inventory_report_plan_payload(current_entries), catalog)
+            plan = validate_plan(_scope_report_payload(_inventory_report_plan_payload(current_entries), current_entries, prompt), catalog)
             preview = preview_plan(plan, tables)
             dry_run_result = execute_plan(plan, tables, dry_run=True)
         except (PlanValidationError, AgentExecutionError, TypeError, ValueError) as exc:
@@ -4303,6 +4316,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         entries: list[TableEntry],
         *,
         model: str,
+        prompt: str = '',
     ) -> dict[str, Any]:
         """Build and dry-run the deterministic attendance/performance/payroll report."""
 
@@ -4313,7 +4327,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             task_id = SESSION.task_id
         catalog = build_table_catalog(tables, display_names={entry.id: entry.name for entry in current_entries})
         try:
-            plan = validate_plan(_hr_report_plan_payload(current_entries), catalog)
+            plan = validate_plan(_scope_report_payload(_hr_report_plan_payload(current_entries), current_entries, prompt), catalog)
             preview = preview_plan(plan, tables)
             dry_run_result = execute_plan(plan, tables, dry_run=True)
         except (PlanValidationError, AgentExecutionError, TypeError, ValueError) as exc:
@@ -4363,7 +4377,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             task_id = SESSION.task_id
         catalog = build_table_catalog(tables, display_names={entry.id: entry.name for entry in current_entries})
         try:
-            plan = validate_plan(_enterprise_diagnosis_plan_payload(current_entries, prompt), catalog)
+            plan = validate_plan(_scope_report_payload(_enterprise_diagnosis_plan_payload(current_entries, prompt), current_entries, prompt), catalog)
             preview = preview_plan(plan, tables)
             dry_run_result = execute_plan(plan, tables, dry_run=True)
         except (PlanValidationError, AgentExecutionError, TypeError, ValueError) as exc:
@@ -4467,7 +4481,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             task_id = SESSION.task_id
         catalog = build_table_catalog(tables, display_names={entry.id: entry.name for entry in current_entries})
         try:
-            plan = validate_plan(_customer_order_plan_payload(current_entries, prompt), catalog)
+            plan = validate_plan(_scope_report_payload(_customer_order_plan_payload(current_entries, prompt), current_entries, prompt), catalog)
             preview = preview_plan(plan, tables)
             dry_run_result = execute_plan(plan, tables, dry_run=True)
         except (PlanValidationError, AgentExecutionError, TypeError, ValueError) as exc:
@@ -4872,21 +4886,21 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             sources = _hr_report_sources(entries)
             if sources is not None:
                 return response(
-                    self._local_hr_management_plan(sources, model=model),
+                    self._local_hr_management_plan(sources, model=model, prompt=prompt),
                     "已映射为员工考勤、绩效、薪资整合分析流程",
                 )
         if _is_inventory_management_report_request(prompt):
             sources = _inventory_report_sources(entries)
             if sources is not None:
                 return response(
-                    self._local_inventory_management_plan(sources, model=model),
+                    self._local_inventory_management_plan(sources, model=model, prompt=prompt),
                     "已映射为采购、销售、库存联动分析流程",
                 )
         if _is_quarterly_sales_report_request(prompt):
             sources = _quarterly_sales_sources(entries)
             if sources is not None:
                 return response(
-                    self._local_quarterly_sales_plan(sources, model=model),
+                    self._local_quarterly_sales_plan(sources, model=model, prompt=prompt),
                     "已映射为多表销售清洗、合并与季度经营报告流程",
                 )
         if _is_sales_management_report_request(prompt):
@@ -4894,7 +4908,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             if source is not None:
                 source_entry, column_mapping = source
                 return response(
-                    self._local_sales_management_plan(source_entry, column_mapping, model=model),
+                    self._local_sales_management_plan(source_entry, column_mapping, model=model, prompt=prompt),
                     "已映射为销售经营分析和五表交付流程",
                 )
         if _is_selection_recommendation_request(prompt):
@@ -5062,7 +5076,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         if mode_hint is None and payload.get("current_chart_spec") is None and _is_hr_management_report_request(prompt):
             hr_sources = _hr_report_sources(entries)
             if hr_sources is not None:
-                result = self._local_hr_management_plan(hr_sources, model=model)
+                result = self._local_hr_management_plan(hr_sources, model=model, prompt=prompt)
                 return {
                     "mode": "data",
                     "route": {
@@ -5082,7 +5096,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         ):
             inventory_sources = _inventory_report_sources(entries)
             if inventory_sources is not None:
-                result = self._local_inventory_management_plan(inventory_sources, model=model)
+                result = self._local_inventory_management_plan(inventory_sources, model=model, prompt=prompt)
                 return {
                     "mode": "data",
                     "route": {
@@ -5102,7 +5116,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         ):
             quarterly_sources = _quarterly_sales_sources(entries)
             if quarterly_sources is not None:
-                result = self._local_quarterly_sales_plan(quarterly_sources, model=model)
+                result = self._local_quarterly_sales_plan(quarterly_sources, model=model, prompt=prompt)
                 return {
                     "mode": "data",
                     "route": {
@@ -5127,6 +5141,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                     source_entry,
                     column_mapping,
                     model=model,
+                    prompt=prompt,
                 )
                 return {
                     "mode": "data",
@@ -5501,6 +5516,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                 destination_name = _specific_report_filename(sales_operation, task_file_names)
             with SESSION.lock:
                 by_name = {name: frame.copy(deep=True) for name, frame in generated}
+                expected_names = (*expected_names, *(name for name in ('任务范围与验收', '范围排除明细') if name in by_name and name not in expected_names))
                 if SESSION.task_id != ticket.task_id:
                     raise ApiError("执行期间任务已改变，报告未提交", 409)
                 missing = [name for name in expected_names if name not in by_name]
@@ -5636,6 +5652,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
         pending_added = len(created_review_ids)
         coverage = [item for report in reports.values() for item in report.get("request_coverage", [])]
         incomplete = any(item["status"] != "available" for item in coverage)
+        incomplete = incomplete or any(item.get('status') != 'passed' for report in reports.values() for item in report.get('constraint_checks', []))
         return {
             "status": "needs_review" if pending_added or incomplete else "completed",
             "message": (
@@ -5651,6 +5668,7 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             "output_tables": output_tables,
             "step_results": step_results,
             "request_coverage": coverage,
+            "constraint_checks": [item for report in reports.values() for item in report.get('constraint_checks', [])],
             "inputs_unchanged": True,
             "acceptance": artifact_acceptance.to_dict() if artifact_acceptance is not None else None,
             "warnings": list(result.warnings),
@@ -7072,7 +7090,8 @@ class ToolboxHandler(BaseHTTPRequestHandler):
     def _task_purge(self, payload: dict[str, Any]) -> dict[str, Any]:
         _validate_payload_keys(payload, set())
         with SESSION.lock:
-            removed = [item for item in TASK_REPOSITORY.purge_expired() if item != SESSION.task_id]
+            removed = TASK_REPOSITORY.purge_expired(
+                exclude={SESSION.task_id, *SESSION_REGISTRY.loaded()}, is_active=JOB_ENGINE.count_active)
         return {"message": f"已清理 {len(removed)} 个超过保留期的任务", "removed": removed}
 
     def _contract_generate(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -7180,13 +7199,31 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                 except (BusinessRuleError, ValueError, TypeError, OSError) as exc:
                     raise ApiError(f'自动授权未通过：{exc}', 422) from None
                 goal.update(customer_scope=customer, profile_id=profile, authorization_revision=proof['revision'])
-            identity_goal = {**goal, 'table_ids': sorted(ids)}
+            from excel_data_toolbox.trusted_automation import engine_revision
+            revision = engine_revision()
+            identity_goal = {**goal, 'table_ids': sorted(ids), 'engine_revision': revision}
             identity = input_fingerprint(json.dumps(identity_goal, sort_keys=True, ensure_ascii=False), signatures)
             # One job at a time per task; same-input retries reuse their job.
             active = [j for j in JOB_ENGINE.list(task_id) if j.job_type == 'business_autopilot'
                       and j.status in {'queued', 'running', 'retrying'}]
+            # A new code revision changes cache identity, but cannot authorize
+            # replay of an interrupted business execution under a new job id.
+            for previous in JOB_ENGINE.list(task_id):
+                if previous.job_type != 'business_autopilot' or previous.status not in {'failed', 'cancelled', 'completed'}:
+                    continue
+                checkpoint = SESSION.task_dir / 'autopilot' / f'{previous.job_id}.json'
+                if checkpoint.is_file():
+                    try:
+                        saved = json.loads(checkpoint.read_text(encoding='utf-8'))
+                        if not isinstance(saved, dict):
+                            raise ValueError('检查点结构无效')
+                        interrupted = saved.get('phase') == 'executing'
+                    except (ValueError, OSError):
+                        raise ApiError('上次交付检查点无法读取，请先核对已有输出后新建独立任务', 409) from None
+                    if interrupted:
+                        raise ApiError('上次交付在执行阶段中断；请先核对已有输出并新建独立任务，不能因内核升级自动重做', 409)
             job = JOB_ENGINE.submit(task_id, 'business_autopilot',
-                {'goal': goal, 'signatures': signatures}, max_attempts=1, idempotency_key=identity)
+                {'goal': goal, 'signatures': signatures, 'engine_revision': revision}, max_attempts=1, idempotency_key=identity)
             if active and all(j.job_id != job.job_id for j in active):
                 JOB_ENGINE.cancel(job.job_id)
                 raise ApiError('当前任务已有自主交付正在运行，请等待完成，避免需求相互覆盖', 409)
@@ -7492,6 +7529,10 @@ def _job_business_autopilot(context: Any, payload: Any) -> dict[str, Any]:
     # another browser's default task. Holding its lock serialises task writes.
     with SESSION_REGISTRY.scoped(context.task_id) as session, session.lock:
         goal = payload['goal']
+        if payload.get('engine_revision'):
+            from excel_data_toolbox.trusted_automation import engine_revision
+            if payload['engine_revision'] != engine_revision():
+                raise ApiError('执行内核在排队期间更新，请重新提交并核对任务规则', 409)
         signatures = {i: _ai_table_signature(session.get(i)) for i in goal['table_ids']}
         if json.loads(json.dumps(signatures, default=str)) != payload['signatures']:
             raise ApiError('输入数据在排队期间变化，未执行旧目标，请重新提交', 409)
@@ -7514,6 +7555,8 @@ def _job_business_autopilot(context: Any, payload: Any) -> dict[str, Any]:
             if saved.get('phase') == 'executing':
                 return {'mode': 'data', 'status': 'clarification', 'delivery_status': 'needs_reconciliation',
                     'execution_performed': False, 'message': '上次在执行阶段中断，可能已有部分输出；先核对交付状态，不自动重复执行。'}
+        if not payload.get('engine_revision'):
+            raise ApiError('旧任务缺少内核版本证据，请重新提交；不会在升级后自动恢复执行', 409)
 
         def save(value):
             temporary = checkpoint.with_suffix('.tmp')
@@ -7637,13 +7680,14 @@ def open_local_url(url: str) -> None:
 def run_server(*, port: int = 8501, open_browser: bool = True) -> None:
     selected_port = find_available_port(port)
     server = ThreadingHTTPServer(("127.0.0.1", selected_port), ToolboxHandler)
-    TASK_REPOSITORY.purge_expired()
+    # Starting an upgraded application does not authorize deleting old customer
+    # work. Expiry remains metadata; cleanup is an explicit task API action.
     SCHEDULER.start(poll_seconds=30)
     JOB_ENGINE.start()
     url = f"http://127.0.0.1:{selected_port}"
     print("\n表格快处已启动")
     print(f"本地地址：{url}")
-    print(f"数据只在本机按任务隔离保存；默认保留 {TASK_RETENTION_DAYS} 天。\n")
+    print(f"数据只在本机按任务隔离保存；默认 {TASK_RETENTION_DAYS} 天标记过期，历史文件仅手动清理。\n")
     if open_browser:
         threading.Timer(0.8, lambda: open_local_url(url)).start()
     try:

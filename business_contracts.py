@@ -66,21 +66,8 @@ class QuestionEvidence:
 
 def numeric_values(series: pd.Series, *, allow_percent: bool = True) -> pd.Series:
     """Parse notation, not currencies or physical-unit conversions."""
-    if pd.api.types.is_bool_dtype(series.dtype):
-        return pd.Series(float("nan"), index=series.index)
-    if pd.api.types.is_numeric_dtype(series.dtype):
-        return pd.to_numeric(series, errors="coerce")
-    raw = series.astype("string").str.strip()
-    percent = raw.str.contains(r"[%％]", na=False)
-    notation = raw.str.replace(r"[,，\s]", "", regex=True)
-    valid_percent = notation.str.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)[%％]", na=False)
-    clean = raw.str.replace(r"[¥￥,，%％\s]", "", regex=True)
-    # Nullable integer arrays cannot hold 10 / 100. Cast before assignment,
-    # not after it. Keep malformed notation missing rather than stripping it
-    # into a plausible number (e.g. "1%2" must not become 0.12).
-    values = pd.to_numeric(clean, errors="coerce").astype("Float64")
-    values = values.mask(percent & (~valid_percent | (not allow_percent)))
-    return values.where(~percent, values / 100.0)
+    from .business_kernel import parse_numeric_values
+    return parse_numeric_values(series, allow_percent=allow_percent)
 
 
 _CURRENCY_ALIASES = {

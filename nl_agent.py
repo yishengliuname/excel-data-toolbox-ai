@@ -782,6 +782,16 @@ def _validate_common_param_types(operation: str, params: Mapping[str, Any]) -> N
 
 
 def _validate_operation_params(operation: str, params: Mapping[str, Any]) -> list[str]:
+    if 'request_scope' in params:
+        from .operation_contracts import REPORT_OPERATIONS
+        if operation not in REPORT_OPERATIONS:
+            raise PlanValidationError('request_scope只适用于报表操作')
+        from .task_contract import TaskScope
+        try:
+            TaskScope.from_dict(_thaw_json(params['request_scope']))
+        except ValueError as exc:
+            raise PlanValidationError(str(exc)) from None
+        params = {k: v for k, v in params.items() if k != 'request_scope'}
     required, allowed = _PARAM_KEYS[operation]
     unknown = sorted(set(params) - allowed)
     if unknown:
@@ -1503,6 +1513,46 @@ def _make_named_outputs(base_name: str, outputs: Mapping[str, pd.DataFrame]) -> 
 
 
 def _execute_step(step: AgentStep, inputs: Sequence[pd.DataFrame]) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
+    """One shared contract gate, before any industry adapter is called."""
+    params = _thaw_json(step.params)
+    raw_scope = params.pop('request_scope', None)
+    if raw_scope is None:
+        return _execute_step_unscoped(step, inputs)
+    from .task_contract import TaskScope, apply_scope
+    from .operation_contracts import REPORT_OPERATIONS
+    if step.operation not in REPORT_OPERATIONS:
+        raise ValueError('任务范围契约不能用于此操作')
+    from dataclasses import replace
+    scope = TaskScope.from_dict(raw_scope)
+    if scope.top_n is not None:
+        raise ValueError('此行业报表尚未绑定Top N输出契约；请使用通用规则分析确认排名范围')
+    if scope.start and step.operation in {'enterprise_diagnosis_report', 'customer_order_analysis'}:
+        raise ValueError('跨事实期间筛选尚需绑定发生月/订单归属月及退款追溯范围；不能先截断原订单或退款。请确认时间口径，或先生成完整双期间报告')
+    names = params.get('source_names') or [f'输入{i + 1}' for i in range(len(inputs))]
+    row_scope, contexts = scope, None
+    if step.operation == 'inventory_management_report':
+        from .inventory_report import infer_inventory_table_roles
+        roles = infer_inventory_table_roles(inputs)
+        if scope.start:
+            params['period_start'] = scope.start
+            params['as_of_date'] = str((pd.Timestamp(scope.end_exclusive) - pd.Timedelta(days=1)).date())
+            row_scope = replace(scope, start='', end_exclusive='')
+        if scope.entities:
+            contexts = {name: {'role': 'notes'} for name in names}
+            for i in roles.values():
+                if any(field not in inputs[i] for field, _ in scope.entities):
+                    raise ValueError('库存实体范围须同时绑定期初、商品与各类流水，不能只筛选部分事实')
+                contexts[names[i]] = {'role': 'fact'}
+    selected, excluded, checks = apply_scope(row_scope, inputs, names, contexts)
+    outputs, report = _execute_step_unscoped(replace(step, params=params), selected)
+    if checks:
+        outputs['任务范围与验收'] = pd.DataFrame(checks).drop(columns=['scope'])
+        outputs['范围排除明细'] = pd.concat(excluded, ignore_index=True, sort=False) if excluded else pd.DataFrame(columns=['范围来源表', '范围排除原因'])
+    report = {**report, 'task_scope': scope.to_dict(), 'constraint_checks': [*report.get('constraint_checks', []), *checks]}
+    return outputs, report
+
+
+def _execute_step_unscoped(step: AgentStep, inputs: Sequence[pd.DataFrame]) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
     params = _thaw_json(step.params)
     operation = step.operation
     if operation in structured_ops.OPERATIONS:
