@@ -32,7 +32,7 @@ Changelog = "https://github.com/yishengliuname/excel-data-toolbox-ai/blob/main/C
 
 [project.optional-dependencies]
 automation = [
-  "duckdb>=1.4,<2",
+  "duckdb>=1.4,<3",
   "pdfplumber>=0.11,<1",
   "Pillow>=11,<13",
   "pytesseract>=0.3.13,<1",
