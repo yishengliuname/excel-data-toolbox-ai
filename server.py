@@ -241,7 +241,7 @@ else:  # Supports: python server.py
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
-APP_VERSION = "9.9.2"
+APP_VERSION = "9.9.3"
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_REQUEST_BYTES = 180 * 1024 * 1024
 MAX_ROWS_PER_TABLE = 300_000
@@ -7749,6 +7749,12 @@ def run_server(*, port: int = 8501, open_browser: bool = True) -> None:
 
 
 def main() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            # Windows redirects may default to an ANSI code page that cannot
+            # represent the startup messages. Keep terminal encoding intact.
+            encoding = stream.encoding if stream.isatty() else "utf-8"
+            stream.reconfigure(encoding=encoding, errors="backslashreplace")
     parser = argparse.ArgumentParser(description="表格快处本地 Excel 数据处理工作台")
     parser.add_argument("--port", type=int, default=8501, help="首选本地端口")
     parser.add_argument("--no-browser", action="store_true", help="启动时不自动打开浏览器")

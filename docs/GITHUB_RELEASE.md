@@ -24,10 +24,10 @@ python -m build
 
 ## 3. Verify the version
 
-For v9.9.2:
+For v9.9.3:
 
 ```powershell
-python scripts/check_release_version.py --tag v9.9.2
+python scripts/check_release_version.py --tag v9.9.3
 ```
 
 The check compares the tag, `pyproject.toml`, and the application version exposed by `/health`.
@@ -49,8 +49,8 @@ The ZIP must not contain `.env`, customer data, outputs, logs, test caches, or d
 Only tag a commit after the checks above pass and CI on `main` is green.
 
 ```powershell
-git tag -a v9.9.2 -m "Excel Data Toolbox AI v9.9.2"
-git push origin v9.9.2
+git tag -a v9.9.3 -m "Excel Data Toolbox AI v9.9.3"
+git push origin v9.9.3
 ```
 
 Pushing a `v*` tag triggers `.github/workflows/release.yml`. Add matching notes at `docs/RELEASE_NOTES_<tag>.md` before tagging. The workflow repeats the safety scan, static checks, tests, version check, Python build, Windows package build, and executable smoke test before publishing the Windows ZIP, demo workbook, wheel, and source distribution.

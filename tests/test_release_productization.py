@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -35,6 +36,19 @@ def test_release_version_rejects_mismatched_tag() -> None:
     result = run_script("check_release_version.py", "--tag", "v0.0.0")
     assert result.returncode != 0
     assert "release version mismatch" in result.stderr
+
+
+def test_cli_accepts_redirected_output_on_western_windows_locale(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "excel_data_toolbox.server", "--help"],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONIOENCODING": "cp1252:strict", "BIAOGE_USER_DATA": str(tmp_path)},
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert "表格快处" in result.stdout.decode("utf-8")
 
 
 def test_public_documentation_has_no_broken_internal_links() -> None:
