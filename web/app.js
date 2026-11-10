@@ -2107,6 +2107,7 @@ async function unifiedConfirmBusinessRules(){
 function unifiedSelectedTables(){return [...document.querySelectorAll("#tableChips input:checked")].map(input=>input.value);}
 function unifiedSetBusy(on,message="AI 正在规划任务…"){
   $("runCommandBtn").disabled=on;$("confirmExecuteBtn").disabled=on;$("chartFollowupBtn").disabled=on;
+  $("demoBtn").disabled=on;$("reconcileDemoBtn").disabled=on;
   $("runCommandBtn").setAttribute("aria-busy",String(on));
   if(on){$("runCommandBtn").textContent=message;toast(message);}
   else $("runCommandBtn").innerHTML='执行 AI 命令 <kbd>Ctrl ↵</kbd>';
@@ -2142,6 +2143,51 @@ async function unifiedUpload(files){
 
 function unifiedShowResult(mode,title,message){
   $("resultWorkspace").classList.remove("hidden");$("resultMode").textContent=mode;$("resultTitle").textContent=title;$("assistantMessage").textContent=message||"AI 已完成任务理解与本地安全检查。";$("resultWorkspace").scrollIntoView({behavior:"smooth",block:"start"});
+}
+
+async function unifiedLoadDemo(scenario) {
+  unifiedSetBusy(true, "正在创建独立演示任务…");
+  try {
+    const result = await post(endpoints.demo, { scenario });
+    unifiedWatchingJob = "";
+    unifiedPlanToken = "";
+    unifiedChartSpec = null;
+    unifiedFollowupChart = "";
+    for (const id of ["resultWorkspace", "autonomousPanel", "partialDeliveryPanel", "businessReviewPanel",
+      "planPanel", "engineeringPanel", "approvalBar", "chartStage"]) {
+      $(id).classList.add("hidden");
+    }
+    $("commandInput").value = scenario === "sales"
+      ? "按月份和地区分析订单金额，生成销售趋势和地区贡献的 Excel 报表。"
+      : "";
+    $("commandInput").dispatchEvent(new Event("input"));
+    await unifiedRefresh();
+    if (scenario === "reconciliation") {
+      unifiedShowResult("本机对账", "电商订单对账演示", result.message);
+      const summary = result.summary;
+      const counts = [
+        ["自动匹配", summary.matched_count],
+        ["待复核", summary.review_group_count],
+        ["订单表独有", summary.left_only_count],
+        ["结算表独有", summary.right_only_count],
+        ["重复键隔离", summary.duplicate_rows_count],
+      ];
+      const panel = $("autonomousPanel");
+      const href = typeof result.download_url === "string" && /^\/download\/[a-f0-9]{32}$/.test(result.download_url)
+        ? result.download_url : "";
+      panel.innerHTML = `<ul class="demo-metrics">${counts.map(([label, value]) =>
+        `<li><strong>${Number(value)}</strong><span>${label}</span></li>`).join("")}</ul>`
+        + (href ? `<a class="secondary-button" href="${href}" download>下载演示对账 Excel</a>` : "");
+      panel.classList.remove("hidden");
+    } else {
+      $("commandInput").focus();
+    }
+    toast(result.message, "success");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    unifiedSetBusy(false);
+  }
 }
 
 function unifiedRenderPlan(payload){
@@ -2296,9 +2342,9 @@ async function unifiedRefreshAiConfig(){
   try{
     const config=await api(endpoints.configStatus);
     const pill=$("aiConfigStatus");
-    pill.className=`status-pill ${config.configured?"ready":"error"}`;
-    pill.innerHTML=`<i></i>${escapeHtml(config.configured?`AI 已配置 · ${config.model}`:"AI 待配置 · 请填写密钥")}`;
-    $("modelLabel").textContent=config.configured?`${config.model} 自动判断工具与步骤`:"请点击右上角「AI 密钥」填写你自己的 DeepSeek API Key";
+    pill.className=`status-pill ${config.configured?"ready":"waiting"}`;
+    pill.innerHTML=`<i></i>${escapeHtml(config.configured?`AI 已配置 · ${config.model}`:"本地模式 · AI 密钥可选")}`;
+    $("modelLabel").textContent=config.configured?`${config.model} 自动判断工具与步骤`:"本地示例和确定性工作流无需 API Key";
     if($("aiKeyBtn"))$("aiKeyBtn").textContent=config.configured?"AI 密钥 ✓":"AI 密钥";
     return config;
   }catch(error){
@@ -2369,7 +2415,9 @@ async function setupUnifiedUi(){
   document.querySelectorAll("[data-command]").forEach(button=>button.addEventListener("click",()=>{$("commandInput").value=button.dataset.command;$("commandInput").dispatchEvent(new Event("input"));$("commandInput").focus();}));
   $("confirmExecuteBtn").addEventListener("click",unifiedExecutePlan);$("chartFollowupBtn").addEventListener("click",()=>{const prompt=$("chartFollowup").value.trim();if(prompt)unifiedRunCommand({prompt,tableIds:unifiedSelectedTables(),modeHint:"chart",currentSpec:unifiedChartSpec});});$("downloadChartBtn").addEventListener("click",downloadCurrentChart);
   $("businessReviewBtn").addEventListener("click",()=>unifiedStartBusinessReview());
-  $("demoBtn").addEventListener("click",async()=>{if((state.data?.tables||[]).length&&!window.confirm("加载演示数据会清空当前任务，再创建一份独立的虚构销售演示任务。是否继续？"))return;unifiedSetBusy(true,"正在新建本地演示任务…");try{await post(endpoints.demo,{});unifiedWatchingJob="";$("autonomousPanel").classList.add("hidden");unifiedPlanToken="";unifiedChartSpec=null;unifiedFollowupChart="";$("resultWorkspace").classList.add("hidden");await unifiedRefresh();toast("演示任务已创建，仅保留一张虚构销售表","success");}catch(error){toast(error.message,"error");}finally{unifiedSetBusy(false);}});$("exportBtn").addEventListener("click",unifiedExport);
+  $("demoBtn").addEventListener("click", () => unifiedLoadDemo("sales"));
+  $("reconcileDemoBtn").addEventListener("click", () => unifiedLoadDemo("reconciliation"));
+  $("exportBtn").addEventListener("click", unifiedExport);
   $("clearTaskBtn").addEventListener("click",async()=>{if(!(state.data?.tables||[]).length)return toast("当前已经是空任务","success");if(!window.confirm("确定清空当前任务的全部表格、处理结果和临时文件吗？此操作无法恢复。"))return;unifiedSetBusy(true,"正在清空当前任务…");try{await unifiedClearTask();}catch(error){toast(error.message,"error");}finally{unifiedSetBusy(false);}});
   $("resetBtn").addEventListener("click",async()=>{if((state.data?.tables||[]).length&&!window.confirm("确定结束当前任务并新建空白任务吗？"))return;await unifiedClearTask("已新建空白任务");});
   $("aiConfigStatus").addEventListener("click",unifiedDiagnoseConnection);$("aiConfigStatus").addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();unifiedDiagnoseConnection();}});

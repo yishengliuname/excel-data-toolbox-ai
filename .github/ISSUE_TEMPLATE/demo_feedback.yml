@@ -1,0 +1,34 @@
+name: Demo feedback / 演示反馈
+description: Tell us how the first run went, even if everything worked.
+title: "[Demo] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for trying the built-in demo. A short report in English or Chinese is welcome.
+        请只使用内置演示数据，公开反馈中请勿附上客户文件、密钥或私人路径。
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and app version / 操作系统和版本
+      placeholder: Windows 11, v9.9.1 ZIP
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: How far did you get? / 运行到哪一步？
+      options:
+        - Opened the exported workbook / 已打开导出的 Excel
+        - Saw results but could not open the workbook / 看到结果但未打开 Excel
+        - Could not run the demo / 未能完成演示
+        - Could not start or install the app / 未能启动或安装
+    validations:
+      required: true
+  - type: textarea
+    id: first-friction
+    attributes:
+      label: What was unclear or still needed manual work? / 哪一步不好理解或仍需手工处理？
+      description: One sentence is enough. If everything worked, what result was most useful?
+    validations:
+      required: true

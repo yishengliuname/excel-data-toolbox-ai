@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from decimal import Decimal
 import hashlib
 import json
 import math
@@ -19,6 +20,7 @@ import zipfile
 from typing import Any, Callable, Mapping
 
 import pandas as pd
+from openpyxl import load_workbook
 
 
 FORMULA_PREFIXES = ("=", "+", "-", "@")
@@ -77,6 +79,14 @@ def _normalise_scalar(value: Any) -> Any:
         return value
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return None
+        if value.is_zero():
+            return "0"
+        # Excel stores numeric value independently of a Decimal's scale.
+        text = format(value, "f")
+        return text.rstrip("0").rstrip(".") if "." in text else text
     if isinstance(value, float):
         # XLSX stores IEEE-754 values through decimal text and may differ in
         # the final machine-precision digits after reopening. Aggregate totals
@@ -177,10 +187,17 @@ def _read_xlsx(
             str(name): frame
             for name, frame in pd.read_excel(path, sheet_name=None, dtype=object, keep_default_na=False).items()
         }
-    with pd.ExcelFile(path) as workbook:
-        available = set(map(str, workbook.sheet_names))
-        raw_tables = {str(name): pd.read_excel(workbook, sheet_name=name, header=None, dtype=object,
-                                              keep_default_na=False) for name in expected_tables if name in available}
+    # Read native cell values. pandas' parser can turn booleans into 0/1
+    # when a summary column contains both flags and numeric values.
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        available = set(workbook.sheetnames)
+        raw_tables = {
+            str(name): pd.DataFrame(workbook[name].values, dtype=object)
+            for name in expected_tables if name in available
+        }
+    finally:
+        workbook.close()
     tables: dict[str, pd.DataFrame] = {}
     for raw_name, expected in expected_tables.items():
         name = str(raw_name)

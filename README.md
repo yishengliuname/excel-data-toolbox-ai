@@ -1,8 +1,6 @@
 # Excel Data Toolbox AI
 
-Turn messy Excel files into clean, analyzed, ready-to-deliver workbooks with one prompt.
-
-AI understands your request. Deterministic local code handles the spreadsheet.
+Reconcile orders and payouts in Excel on your computer. Match order IDs, flag amount differences and duplicates, and export the evidence for review. The same workspace also cleans, joins, and analyzes spreadsheets.
 
 English | [简体中文](README_ZH.md)
 
@@ -10,6 +8,18 @@ English | [简体中文](README_ZH.md)
 [![CodeQL](https://github.com/yishengliuname/excel-data-toolbox-ai/actions/workflows/codeql.yml/badge.svg)](https://github.com/yishengliuname/excel-data-toolbox-ai/actions/workflows/codeql.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](https://www.python.org/downloads/)
+
+**[Download for Windows](https://github.com/yishengliuname/excel-data-toolbox-ai/releases/latest) · [See the demo result](docs/DEMO.md) · [Help improve the project](#contributing)**
+
+![Order reconciliation walkthrough with input, results, and the 10-unit shortfall](docs/assets/order-reconciliation.svg)
+
+### Try an order reconciliation
+
+1. Extract the Windows ZIP and run `BiaogeKuaichuAI.exe`.
+2. Choose **试用电商订单对账** (Try order reconciliation). The app creates two fictional tables and reconciles them locally without an API key.
+3. Review the exceptions and download the Excel workbook. The sample includes a payout that is 10 currency units short, one unmatched order on each side, and three rows held out because an order ID is duplicated.
+
+The release includes a downloadable `Synthetic-Order-Reconciliation.xlsx` produced by the packaged app. You can also [read the expected results in your browser](docs/DEMO.md).
 
 ## What it does
 
@@ -37,7 +47,7 @@ The model interprets the request; it does not receive arbitrary code or file-sys
 
 For the shortest setup, open [Releases](https://github.com/yishengliuname/excel-data-toolbox-ai/releases), download `Excel-Data-Toolbox-AI-Windows-x64.zip`, extract it, and run `BiaogeKuaichuAI.exe`.
 
-The Windows package does not require Git or a separate Python installation. If a release is not published yet, use the source installation below.
+The Windows package includes its runtime. To use the built-in order demo, choose **试用电商订单对账** after launch.
 
 ### Run from source
 
@@ -65,28 +75,7 @@ python -m pip install -e '.[automation]'
 python -m excel_data_toolbox.server
 ```
 
-Open `http://127.0.0.1:8501/`, select **Load demo data / 加载演示数据**, and try the workflow below. An AI provider is optional; local deterministic workflows work without an API key.
-
-## See it in action
-
-**Input:** the built-in fictional `sales.xlsx`-style dataset.
-
-**Prompt:**
-
-> Analyze revenue, cost, and profit by region and product. Find low-margin items, create a monthly trend chart, and export a management-ready workbook. Do not modify the original file.
-
-**Output:**
-
-- KPI summary
-- Monthly trend
-- Product contribution
-- Low-margin warnings
-- Native Excel charts
-- Auditable Excel workbook
-
-The demo is generated locally and contains no customer names, credentials, or private files. See the repeatable [demo guide](docs/DEMO.md) and the privacy-safe [recording specification](docs/DEMO_ASSETS.md).
-
-If this project saves you time on real Excel work, consider giving it a ⭐. It helps more people discover the project.
+Open `http://127.0.0.1:8501/`. For the sales example, select **加载演示数据** (Load demo data), then **执行 AI 命令** (Run command) to run the pre-filled request. Both examples use fictional data. [Demo walkthrough](docs/DEMO.md)
 
 ## Architecture
 
@@ -175,9 +164,11 @@ Useful project guides:
 
 ## Contributing
 
-Small documentation, testing, accessibility, packaging, and synthetic-demo improvements are welcome. Start with [Your first contribution](CONTRIBUTING.md#your-first-contribution) and the prepared [good first issues](docs/GOOD_FIRST_ISSUES.md).
+**Please help make this project easier to use and more reliable.** If you reconcile spreadsheets for work, try the demo once and tell us where you got stuck, which result was hard to interpret, or which check you still had to do by hand. A short report is a useful contribution, even if you have never opened a pull request. [Share feedback or report a bug](https://github.com/yishengliuname/excel-data-toolbox-ai/issues/new/choose)
 
-Use the issue templates for reproducible bugs, real Excel-task proposals, and domain-pack vocabulary. Report security vulnerabilities privately according to [SECURITY.md](SECURITY.md). Do not attach customer workbooks or active credentials.
+If you would like to contribute code, start with a small documentation, testing, accessibility, or packaging improvement. An example with fictional rows and a clear expected result helps us reproduce a problem safely. Thank you for giving it a try. [Contribution guide](CONTRIBUTING.md) · [Starter tasks](docs/GOOD_FIRST_ISSUES.md)
+
+If it saves you time on Excel work, a ⭐ helps more people find the project.
 
 ## Roadmap
 

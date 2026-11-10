@@ -99,7 +99,7 @@ try {
     $requiredFiles = @(
         $executable,
         (Join-Path $internal 'web\unified.html'),
-        (Join-Path $internal 'domain_packs.json')
+        (Join-Path $internal 'excel_data_toolbox\domain_packs.json')
     )
     foreach ($requiredFile in $requiredFiles) {
         if (-not (Test-Path -LiteralPath $requiredFile)) {
@@ -115,7 +115,8 @@ try {
 
     if (-not $SkipSmokeTest) {
         $stage = 'run packaged application smoke test'
-        & $python scripts/smoke_test_windows_build.py --app-dir $appDist --expected-version $version
+        $sampleWorkbook = Join-Path $dist 'Synthetic-Order-Reconciliation.xlsx'
+        & $python scripts/smoke_test_windows_build.py --app-dir $appDist --expected-version $version --sample-output $sampleWorkbook
         if ($LASTEXITCODE -ne 0) { throw 'Packaged application smoke test failed.' }
     }
 

@@ -2,10 +2,12 @@
 
 Thank you for helping improve Excel Data Toolbox AI. Documentation, tests, accessibility, packaging, safe data handling, and focused bug fixes are welcome.
 
+You can help without writing code. [Try the fictional order reconciliation](docs/DEMO.md) and [tell us](https://github.com/yishengliuname/excel-data-toolbox-ai/issues/new/choose) the first step that was hard to follow, or which result you still needed to check manually. English and Chinese feedback are welcome.
+
 ## Your first contribution
 
 1. Run the project from source.
-2. Load the built-in synthetic demo data.
+2. Run the [built-in order reconciliation](docs/DEMO.md) and open the exported workbook.
 3. Pick a prepared [good first issue](docs/GOOD_FIRST_ISSUES.md).
 4. Create a short branch from `main`.
 5. Run the required checks.

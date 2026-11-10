@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>表格快处 AI · 一句话完成 Excel 工作</title>
-  <link rel="stylesheet" href="/static/unified.css?v=9.1.0">
+  <link rel="stylesheet" href="/static/unified.css?v=9.9.1">
 </head>
 <body>
   <main id="unifiedApp" class="app-shell">
@@ -24,6 +24,10 @@
         <span class="eyebrow">ONE COMMAND · COMPLETE EXCEL WORKFLOW</span>
         <h1>告诉 AI 你要什么，<br><em>剩下的交给程序。</em></h1>
         <p>清洗、合并、匹配、对账、统计分析、可视化、VBA、Power BI 与数据库方案，全部从同一个输入框开始。</p>
+        <div class="demo-entry">
+          <button id="reconcileDemoBtn" class="secondary-button" type="button">试用电商订单对账</button>
+          <small>使用虚构数据 · 在本机执行 · 无需 API Key</small>
+        </div>
       </div>
 
       <div class="agent-panel">
@@ -73,7 +77,7 @@
     </section>
 
     <section class="task-context">
-      <div class="context-heading"><div><span class="eyebrow">LOCAL TASK</span><h2>当前任务</h2></div><div><button id="clearTaskBtn" class="danger-button" type="button">一键清空</button><button id="demoBtn" class="quiet-button" type="button" title="清空当前任务并加载一份虚构销售数据，用于体验 AI、分析和图表功能">加载演示数据</button><button id="exportBtn" class="secondary-button" type="button" disabled>导出全部结果</button></div></div>
+      <div class="context-heading"><div><span class="eyebrow">LOCAL TASK</span><h2>当前任务</h2></div><div><button id="clearTaskBtn" class="danger-button" type="button">一键清空</button><button id="demoBtn" class="quiet-button" type="button" title="新建独立任务并加载一份虚构销售表">加载演示数据</button><button id="exportBtn" class="secondary-button" type="button" disabled>导出全部结果</button></div></div>
       <div class="context-grid">
         <div class="table-panel"><div id="tableList" class="table-list"><div class="empty-state">上传文件后，工作表会显示在这里。</div></div></div>
         <div class="preview-panel"><div class="preview-head"><b id="previewTitle">数据预览</b><span id="previewMeta">—</span></div><div class="preview-scroll"><table id="previewTable"><tbody><tr><td class="empty-state">暂无数据</td></tr></tbody></table></div></div>
@@ -105,6 +109,6 @@
     </div>
   </div>
   <div id="toast" class="toast" role="status"></div>
-  <script src="/static/app.js?v=9.1.0"></script>
+  <script src="/static/app.js?v=9.9.1"></script>
 </body>
 </html>

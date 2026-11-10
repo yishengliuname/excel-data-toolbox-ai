@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "excel-data-toolbox-ai"
-version = "9.9.0"
+version = "9.9.1"
 description = "Local-first AI workspace that turns messy Excel and CSV files into cleaned, analyzed, and auditable workbooks"
 readme = "README.md"
 requires-python = ">=3.11"

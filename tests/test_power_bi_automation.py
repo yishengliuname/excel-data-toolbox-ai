@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
+from urllib.parse import urlsplit
 import zipfile
 
 import pandas as pd
@@ -83,7 +84,7 @@ def test_fabric_publisher_creates_model_then_bound_report_and_verifies(tmp_path:
 
     def transport(method: str, url: str, headers: object, body: bytes | None, timeout: int) -> HttpResult:
         calls.append({"method": method, "url": url, "headers": headers, "body": body, "timeout": timeout})
-        if "login.microsoftonline.com" in url:
+        if urlsplit(url).hostname == "login.microsoftonline.com":
             assert body and b"client_secret=unit-test-secret-never-log" in body
             return HttpResult(200, {}, {"access_token": "fake-access-token"})
         if method == "POST" and url.endswith("/semanticModels"):

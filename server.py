@@ -18,7 +18,6 @@ import io
 import json
 import hashlib
 import math
-import mimetypes
 import os
 from pathlib import Path
 import random
@@ -242,7 +241,7 @@ else:  # Supports: python server.py
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
-APP_VERSION = "9.9.0"
+APP_VERSION = "9.9.1"
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_REQUEST_BYTES = 180 * 1024 * 1024
 MAX_ROWS_PER_TABLE = 300_000
@@ -3138,14 +3137,10 @@ def _demo_sales_frame() -> pd.DataFrame:
             }
         )
     frame = pd.DataFrame(rows)
-    # Deliberately add a few quality issues so every analysis feature is visible.
+    # Keep high-value outliers, but give first-run reports complete source data
+    # so they can finish without asking the user to define cleaning rules.
     frame.loc[17, ["订单金额", "数量", "成本"]] = [128000.0, 80, 42600.0]
     frame.loc[119, ["订单金额", "数量", "成本"]] = [96000.0, 65, 33800.0]
-    frame.loc[5, "地区"] = pd.NA
-    frame.loc[73, "客户"] = pd.NA
-    frame.loc[144, "订单金额"] = pd.NA
-    frame.loc[201, "渠道"] = " "
-    frame = pd.concat([frame, frame.iloc[[10, 28]].copy(deep=True)], ignore_index=True)
     return frame
 
 
@@ -3284,6 +3279,17 @@ def _load_advanced_asset(path: Path) -> dict[str, pd.DataFrame]:
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
 
 
+WEB_ASSETS = {
+    "/": ("unified.html", "text/html"),
+    "/index.html": ("unified.html", "text/html"),
+    "/static/unified.html": ("unified.html", "text/html"),
+    "/static/index.html": ("index.html", "text/html"),
+    "/static/app.js": ("app.js", "text/javascript"),
+    "/static/unified.css": ("unified.css", "text/css"),
+    "/static/styles.css": ("styles.css", "text/css"),
+}
+
+
 class ToolboxHandler(BaseHTTPRequestHandler):
     server_version = f"BiaogeKuaichu/{APP_VERSION}"
 
@@ -3327,19 +3333,14 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             raise ApiError("请求参数必须是对象")
         return payload
 
-    def _serve_static(self, path: Path) -> None:
+    def _serve_static(self, filename: str, content_type: str) -> None:
         try:
-            resolved = path.resolve(strict=True)
+            content = (WEB_DIR / filename).read_bytes()
         except FileNotFoundError:
             self.send_error(404)
             return
-        if WEB_DIR.resolve() not in resolved.parents and resolved != WEB_DIR.resolve():
-            self.send_error(403)
-            return
-        content = resolved.read_bytes()
-        mime, _ = mimetypes.guess_type(resolved.name)
         self.send_response(200)
-        self.send_header("Content-Type", f"{mime or 'application/octet-stream'}; charset=utf-8")
+        self.send_header("Content-Type", content_type + "; charset=utf-8")
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Cache-Control", "no-store, max-age=0")
         self.send_header("Pragma", "no-cache")
@@ -3435,11 +3436,8 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                 )
             elif path.startswith("/download/"):
                 self._download(path.rsplit("/", 1)[-1])
-            elif path == "/" or path == "/index.html":
-                self._serve_static(WEB_DIR / "unified.html")
-            elif path.startswith("/static/"):
-                relative = path[len("/static/") :]
-                self._serve_static(WEB_DIR / relative)
+            elif path in WEB_ASSETS:
+                self._serve_static(*WEB_ASSETS[path])
             else:
                 self.send_error(404)
         except Exception as exc:  # pragma: no cover - last-resort HTTP boundary
@@ -5749,7 +5747,12 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             return response
 
     def _demo(self, payload: dict[str, Any]) -> dict[str, Any]:
-        _validate_payload_keys(payload, set())
+        _validate_payload_keys(payload, {"scenario"})
+        scenario = payload.get("scenario", "sales")
+        if scenario == "reconciliation":
+            return self._demo_reconciliation()
+        if scenario != "sales":
+            raise ApiError("未知演示场景")
         frame = _demo_sales_frame()
         with SESSION.lock:
             # Demo data is a complete disposable task, not another table to
@@ -5761,11 +5764,11 @@ class ToolboxHandler(BaseHTTPRequestHandler):
                 "虚构销售演示数据",
                 frame,
                 source="本地生成的虚构演示数据",
-                original=False,
+                original=True,
             )
             SESSION.record(
                 "生成演示数据",
-                "本机生成虚构销售数据；内含少量空值、重复记录和异常数值",
+                "本机生成虚构销售数据，包含少量高金额订单",
                 inputs=[],
                 produced=[new_id],
                 before_rows=0,
@@ -5778,6 +5781,50 @@ class ToolboxHandler(BaseHTTPRequestHandler):
             "task_id": SESSION.task_id,
             "new_task": True,
         }
+
+    def _demo_reconciliation(self) -> dict[str, Any]:
+        """Run the same reconciliation and export as customer work, using synthetic data."""
+        left = pd.DataFrame(
+            [
+                ("DEMO-001", 100.00), ("DEMO-002", 158.00), ("DEMO-003", 39.00),
+                ("DEMO-004", 59.00), ("DEMO-004", 59.00), ("DEMO-005", 88.00),
+            ],
+            columns=["订单号", "金额"],
+        )
+        right = pd.DataFrame(
+            [
+                ("DEMO-001", 100.00), ("DEMO-002", 148.00), ("DEMO-004", 59.00),
+                ("DEMO-005", 88.00), ("DEMO-006", 25.00),
+            ],
+            columns=["订单号", "金额"],
+        )
+        SESSION.reset()
+        with SESSION.lock:
+            SESSION.task_name = "虚构电商结算对账演示"
+            left_id = SESSION.add_table("订单应结表", left, source="本地生成的虚构演示数据", original=True)
+            right_id = SESSION.add_table("平台实结表", right, source="本地生成的虚构演示数据", original=True)
+            result = self._reconcile_advanced(
+                {
+                    "left_id": left_id,
+                    "right_id": right_id,
+                    "config": {
+                        "left_keys": ["订单号"],
+                        "right_keys": ["订单号"],
+                        "amount": {"left_column": "金额", "right_column": "金额", "tolerance": 0},
+                    },
+                    "output_name": "演示对账",
+                }
+            )
+            delivery = self._export(
+                {
+                    "tables": [left_id, right_id, *result["table_ids"].values()],
+                    "format": "xlsx",
+                    "filename": "电商结算对账演示",
+                    "include_summary": True,
+                    "professional": True,
+                }
+            )
+            return {**delivery, **result, "task_id": SESSION.task_id, "new_task": True}
 
     def _analysis(self, payload: dict[str, Any]) -> dict[str, Any]:
         _validate_payload_keys(payload, {"table"})

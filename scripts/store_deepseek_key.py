@@ -58,41 +58,13 @@ def _migrate_project_env(store: SecureSecretStore) -> None:
     print("密钥已迁移到 Windows DPAPI；.env 明文密钥行已移除。")
 
 
-def _restore_project_env(store: SecureSecretStore) -> None:
-    """Recovery bridge for re-encrypting under a different Windows identity."""
-    secret = store.get("DEEPSEEK_API_KEY")
-    if not secret:
-        raise SystemExit("当前 Windows 用户的保险箱中没有可恢复密钥。")
-    env_path = PROJECT / ".env"
-    lines = env_path.read_text(encoding="utf-8-sig").splitlines() if env_path.is_file() else []
-    retained = [
-        line for line in lines
-        if not (line.strip() and not line.lstrip().startswith("#") and line.split("=", 1)[0].strip() == "DEEPSEEK_API_KEY")
-    ]
-    retained.append(f"DEEPSEEK_API_KEY={secret}")
-    secret = ""
-    handle, temp_name = tempfile.mkstemp(prefix=".env_", dir=PROJECT)
-    os.close(handle)
-    temp = Path(temp_name)
-    try:
-        temp.write_text("\n".join(retained).rstrip() + "\n", encoding="utf-8")
-        os.replace(temp, env_path)
-    finally:
-        temp.unlink(missing_ok=True)
-    print("密钥已临时恢复到 .env；请立即在目标 Windows 用户下再次执行 --migrate-env。")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="安全保存 DeepSeek API Key")
     parser.add_argument("--migrate-env", action="store_true", help="从项目 .env 迁移并删除明文密钥行")
-    parser.add_argument("--restore-env-from-vault", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     store = SecureSecretStore(PROJECT / "user_data" / "secrets.dpapi")
     if args.migrate_env:
         _migrate_project_env(store)
-        return
-    if args.restore_env_from_vault:
-        _restore_project_env(store)
         return
     secret = getpass("请输入 DeepSeek API Key（输入不会显示）：").strip()
     store.set("DEEPSEEK_API_KEY", secret)

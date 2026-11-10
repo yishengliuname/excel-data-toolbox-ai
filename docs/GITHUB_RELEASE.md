@@ -24,10 +24,10 @@ python -m build
 
 ## 3. Verify the version
 
-For v9.9.0:
+For v9.9.1:
 
 ```powershell
-python scripts/check_release_version.py --tag v9.9.0
+python scripts/check_release_version.py --tag v9.9.1
 ```
 
 The check compares the tag, `pyproject.toml`, and the application version exposed by `/health`.
@@ -40,7 +40,7 @@ On Windows:
 .\scripts\build_windows.ps1 -RecreateEnvironment
 ```
 
-The script creates an isolated build environment, builds the existing PyInstaller specification, runs a local HTTP/demo/export smoke test, and creates `dist/Excel-Data-Toolbox-AI-Windows-x64.zip`.
+The script creates an isolated build environment, builds the PyInstaller specification, runs the sales and reconciliation demos against the packaged app, and reopens both exports. It creates `dist/Excel-Data-Toolbox-AI-Windows-x64.zip` and a separate `dist/Synthetic-Order-Reconciliation.xlsx`.
 
 The ZIP must not contain `.env`, customer data, outputs, logs, test caches, or development sources.
 
@@ -49,11 +49,11 @@ The ZIP must not contain `.env`, customer data, outputs, logs, test caches, or d
 Only tag a commit after the checks above pass and CI on `main` is green.
 
 ```powershell
-git tag -a v9.9.0 -m "Excel Data Toolbox AI v9.9.0"
-git push origin v9.9.0
+git tag -a v9.9.1 -m "Excel Data Toolbox AI v9.9.1"
+git push origin v9.9.1
 ```
 
-Pushing a `v*` tag triggers `.github/workflows/release.yml`. Add matching notes at `docs/RELEASE_NOTES_<tag>.md` before tagging (for example, `docs/RELEASE_NOTES_v9.9.0.md`). The workflow repeats the safety scan, static checks, tests, version check, Python build, Windows package build, and executable smoke test before creating the GitHub Release with the Windows ZIP, wheel, and source distribution.
+Pushing a `v*` tag triggers `.github/workflows/release.yml`. Add matching notes at `docs/RELEASE_NOTES_<tag>.md` before tagging. The workflow repeats the safety scan, static checks, tests, version check, Python build, Windows package build, and executable smoke test before publishing the Windows ZIP, demo workbook, wheel, and source distribution.
 
 ## 6. Verify the GitHub Release
 
@@ -62,9 +62,9 @@ Pushing a `v*` tag triggers `.github/workflows/release.yml`. Add matching notes 
 3. Extract it outside the repository.
 4. Run `BiaogeKuaichuAI.exe`.
 5. Confirm `/health` reports the release version.
-6. Load synthetic demo data.
-7. Export a workbook and open it in desktop Excel or LibreOffice.
-8. Confirm no API key is required for the local demo.
+6. Run **试用电商订单对账** and confirm the expected exceptions in the [demo guide](DEMO.md).
+7. Open the exported workbook in desktop Excel or LibreOffice and check the shortfall of 10.
+8. Repeat with **加载演示数据** and the prefilled sales request. Confirm both demos work without an API key.
 
 Do not call a release complete until the clean-machine download test passes.
 

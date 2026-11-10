@@ -1,8 +1,6 @@
 # Excel Data Toolbox AI（表格快处 AI）
 
-用一句话处理 Excel：清洗、分析、对账、生成图表，并导出可以直接交付的工作簿。
-
-AI 负责理解需求，本地确定性代码负责真正处理 Excel。
+在本机核对 Excel 订单与平台结算单，找出金额差异、重复单号和未匹配记录，再导出带明细的 Excel 供复核。也支持表格清洗、合并和分析。
 
 [English](README.md) | 简体中文
 
@@ -10,6 +8,18 @@ AI 负责理解需求，本地确定性代码负责真正处理 Excel。
 [![CodeQL](https://github.com/yishengliuname/excel-data-toolbox-ai/actions/workflows/codeql.yml/badge.svg)](https://github.com/yishengliuname/excel-data-toolbox-ai/actions/workflows/codeql.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](https://www.python.org/downloads/)
+
+**[下载 Windows 版](https://github.com/yishengliuname/excel-data-toolbox-ai/releases/latest) · [直接看演示结果](docs/DEMO.md) · [一起完善项目](#一起完善项目)**
+
+![订单对账流程图，展示输入、对账结果和一笔少结 10 元的订单](docs/assets/order-reconciliation.svg)
+
+### 试一次电商订单对账
+
+1. 下载并解压 Windows 安装包，运行 `BiaogeKuaichuAI.exe`。
+2. 点击 **试用电商订单对账**。程序在本机生成两张虚构表并完成对账，无需 API Key。
+3. 查看异常并下载 Excel。样例包含一笔少结 10 元的订单、两张表各一笔未匹配记录，以及因订单号重复而隔离的 3 行。
+
+发布页提供由打包程序实际生成的 `Synthetic-Order-Reconciliation.xlsx`。也可以直接在浏览器里查看 [输入和预期结果](docs/DEMO.md)。
 
 ## 它能做什么
 
@@ -37,7 +47,7 @@ AI 负责理解需求，本地确定性代码负责真正处理 Excel。
 
 进入 [Releases](https://github.com/yishengliuname/excel-data-toolbox-ai/releases)，下载 `Excel-Data-Toolbox-AI-Windows-x64.zip`，解压后运行 `BiaogeKuaichuAI.exe`。
 
-Windows 发布包不要求安装 Git 或独立 Python。如果暂时还没有正式 Release，请按下面的源码方式运行。
+Windows 发布包包含运行环境。打开程序后即可点击 **试用电商订单对账**。
 
 ### 从源码运行
 
@@ -65,28 +75,7 @@ python -m pip install -e '.[automation]'
 python -m excel_data_toolbox.server
 ```
 
-打开 `http://127.0.0.1:8501/`，点击“加载演示数据”即可体验。外部 AI 服务不是必需项；不配置 API Key 也可以使用本地确定性工作流。
-
-## 看一个简单 Demo
-
-**输入：** 程序内置的完全虚构销售数据。
-
-**命令：**
-
-> 按地区和产品分析销售额、成本和利润，找出低毛利商品，生成月度趋势图，并导出老板可以直接看的工作簿。不要修改原始文件。
-
-**输出：**
-
-- KPI 汇总
-- 月度趋势
-- 产品贡献
-- 低毛利预警
-- 原生 Excel 图表
-- 可审计的 Excel 工作簿
-
-演示数据完全在本地生成，不包含客户名称、凭据或私人文件。操作步骤见 [可重复 Demo 指南](docs/DEMO.md) 和 [隐私安全拍摄规范](docs/DEMO_ASSETS.md)。
-
-如果这个项目确实帮你减少了 Excel 重复工作，欢迎点一个 ⭐，这会帮助更多人发现它。
+打开 `http://127.0.0.1:8501/` 即可试用。想体验销售分析，可以点击 **加载演示数据**，再点击 **执行 AI 命令**，使用预填的销售报表命令。[演示步骤](docs/DEMO.md)
 
 ## 架构
 
@@ -154,7 +143,15 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 
 保存后重启本地程序。不要提交 `.env`，不要在公开 Issue 中粘贴有效密钥，也不要上传客户工作簿。
 
-## 开发与贡献
+## 一起完善项目
+
+这个项目由个人维护，最需要的是不同工作场景里的真实反馈。诚恳邀请做财务、电商运营或日常表格工作的朋友试一次对账演示，告诉我哪一步卡住、哪个结果不好理解，或者哪项核对还得自己做。即使只留一句话，也能帮助我们改进。欢迎用中文或英文。 [提交试用反馈](https://github.com/yishengliuname/excel-data-toolbox-ai/issues/new/choose)
+
+如果愿意动手，欢迎从文档、测试、可访问性或打包的小改动开始。用几行虚构数据说明问题和预期结果，就能帮助我们安全地复现。谢谢你愿意一起完善。 [贡献指南](CONTRIBUTING.md) · [适合上手的任务](docs/GOOD_FIRST_ISSUES.md)
+
+如果项目确实帮你减少了 Excel 重复工作，欢迎点一个 ⭐，让更多人发现它。
+
+## 开发
 
 ```bash
 python -m pip install -e '.[automation,dev]'
