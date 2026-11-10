@@ -11,7 +11,7 @@ body:
     id: environment
     attributes:
       label: Operating system and app version / 操作系统和版本
-      placeholder: Windows 11, v9.9.1 ZIP
+      placeholder: Windows 11, release ZIP
     validations:
       required: true
   - type: dropdown

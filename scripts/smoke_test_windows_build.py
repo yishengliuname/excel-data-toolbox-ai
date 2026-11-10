@@ -39,10 +39,13 @@ def request_json(url: str, *, payload: dict | None = None, task_id: str = "") ->
         return json.loads(response.read().decode("utf-8"))
 
 
-def wait_for_health(base_url: str, timeout: float = 90) -> dict:
+def wait_for_health(base_url: str, process: subprocess.Popen, timeout: float = 90) -> dict:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
     while time.monotonic() < deadline:
+        return_code = process.poll()
+        if return_code is not None:
+            raise RuntimeError(f"packaged server exited before becoming healthy (exit code {return_code})")
         try:
             return request_json(urljoin(base_url, "/health"))
         except (URLError, TimeoutError, ConnectionError) as exc:
@@ -147,7 +150,7 @@ def main() -> None:
                 stderr=subprocess.STDOUT,
             )
             try:
-                health = wait_for_health(base_url)
+                health = wait_for_health(base_url, process)
                 if health.get("status") != "ok" or health.get("version") != args.expected_version:
                     raise RuntimeError(f"unexpected health response: {health}")
 

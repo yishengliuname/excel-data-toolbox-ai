@@ -52,3 +52,5 @@ def test_release_workflow_builds_in_a_clean_environment() -> None:
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     assert "build_windows.ps1 -RecreateEnvironment" in workflow
     assert "build_windows.ps1 -UseCurrentEnvironment" not in workflow
+    script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+    assert '-m pip install "${projectDir}[automation,dev]"' in script

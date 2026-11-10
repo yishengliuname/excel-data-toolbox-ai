@@ -80,7 +80,9 @@ try {
         & $python -m pip install --upgrade pip
         if ($LASTEXITCODE -ne 0) { throw 'Failed to upgrade pip in the build environment.' }
         $stage = 'install release dependencies'
-        & $python -m pip install -e "${projectDir}[automation,dev]"
+        # PyInstaller cannot resolve the editable package mapping in a clean
+        # checkout whose directory name differs from excel_data_toolbox.
+        & $python -m pip install "${projectDir}[automation,dev]"
         if ($LASTEXITCODE -ne 0) { throw 'Failed to install build dependencies.' }
     }
 
